@@ -397,15 +397,19 @@ def _plan_trip_on_expedia(prompt: str) -> bool:
     activate_windowt_title(expedia_url)
     time.sleep(1.2)
 
-    # If details are incomplete, hand over to the full planner to finish form filling in Expedia.
-    if expedia_url.endswith("/Flights"):
-        assistant(
-            assistant_goal=(
-                "Use Microsoft Edge and Expedia.com to plan a trip from this user request: "
-                f"{prompt}. Fill all required Expedia flight fields and show viable options."
-            ),
-            called_from="assistant",
-        )
+    # Always hand over to the planner so execution continues end-to-end even when Expedia
+    # shows transient errors, sign-in modals, or partially prefilled searches.
+    assistant(
+        assistant_goal=(
+            "Use Microsoft Edge and Expedia.com to complete this trip request end-to-end: "
+            f"{prompt}. "
+            "First dismiss any sign-in overlays or promotional popups. "
+            "If Expedia shows an error like 'Sorry, we're having a problem on our end', click Retry. "
+            "If Retry fails, rebuild the search form manually from the user request and run search again. "
+            "Finish by showing available trip options on the results page."
+        ),
+        called_from="assistant",
+    )
     return True
 
 
