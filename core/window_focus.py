@@ -6,6 +6,7 @@ import time
 import winreg
 import shutil
 import re
+from urllib.parse import quote, urlsplit, urlunsplit
 from fuzzywuzzy import fuzz
 import pygetwindow as gw
 import uiautomation as auto
@@ -69,6 +70,45 @@ def _normalize_url(value):
     return f"https://{text}"
 
 
+def _candidate_urls_for_healing(value):
+    raw = str(value or "").strip().strip('"').strip("'")
+    raw = raw.rstrip(").,;:!?")
+    if not raw:
+        return []
+
+    # Fix common malformed scheme variants.
+    fixed = raw.replace("http:///", "http://").replace("https:///", "https://")
+    fixed = fixed.replace("http:/", "http://").replace("https:/", "https://")
+    fixed = fixed.replace("http://https://", "https://").replace("https://http://", "http://")
+
+    candidates = []
+    for url in [fixed, _normalize_url(fixed)]:
+        parsed = urlsplit(url)
+        if not parsed.netloc:
+            continue
+
+        # URL-encode spaces and preserve query separators.
+        path = quote(parsed.path, safe="/%:@-._~")
+        query = quote(parsed.query, safe="=&%:@-._~,+")
+        fragment = quote(parsed.fragment, safe="=&%:@-._~,+")
+        healed = urlunsplit((parsed.scheme or "https", parsed.netloc.lower(), path, query, fragment))
+        if healed not in candidates:
+            candidates.append(healed)
+
+    # Expedia-specific fallback if query got corrupted.
+    if any("expedia." in c for c in candidates):
+        base_candidates = []
+        for c in candidates:
+            parsed = urlsplit(c)
+            if parsed.path.lower().startswith("/flights-search") and not parsed.query:
+                base_candidates.append("https://www.expedia.com/Flights")
+        for c in base_candidates:
+            if c not in candidates:
+                candidates.append(c)
+
+    return candidates
+
+
 def _open_url_in_edge(url):
     normalized_url = _normalize_url(url)
     edge_exe = _find_edge_executable()
@@ -88,6 +128,18 @@ def _open_url_in_edge(url):
         return False
 
 
+def heal_and_open_url_in_edge(url):
+    """Attempt to self-heal malformed URLs and open them in Edge in real-time."""
+    candidates = _candidate_urls_for_healing(url)
+    if not candidates:
+        return False, ""
+
+    for candidate in candidates:
+        if _open_url_in_edge(candidate):
+            return True, candidate
+    return False, ""
+
+
 def _sanitize_application_name(application_name):
     return str(application_name or "").strip().strip('"').strip("'")
 
@@ -98,7 +150,8 @@ def _launch_native_application(application_name):
         return False
 
     if _is_probable_url(app):
-        return _open_url_in_edge(app)
+        ok, _ = heal_and_open_url_in_edge(app)
+        return ok
 
     lowered = app.lower()
     if lowered in {"file explorer", "windows explorer", "explorer", "this pc"}:

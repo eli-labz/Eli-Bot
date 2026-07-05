@@ -13,6 +13,7 @@ from env_loader import load_env
 from voice import speaker, set_volume, set_subtitles
 from driver import assistant, act, fast_act, auto_role, perform_simulated_keypress, write_action
 from window_focus import activate_windowt_title
+from window_focus import heal_and_open_url_in_edge
 
 
 load_env()
@@ -288,14 +289,19 @@ def _execute_any_url_end_to_end(url: str, objective_prompt: str) -> bool:
         return False
 
     speaker("Opening URL in Microsoft Edge and executing end-to-end.")
-    activate_windowt_title(clean_url)
+    opened, healed_url = heal_and_open_url_in_edge(clean_url)
+    final_url = healed_url or clean_url
+    if not opened:
+        activate_windowt_title(clean_url)
     time.sleep(1.2)
 
     assistant(
         assistant_goal=(
             "Control Microsoft Edge end-to-end on this URL: "
-            f"{clean_url}. "
+            f"{final_url}. "
             f"User objective: {objective_prompt}. "
+            "Before each critical step, validate the current URL against the intended domain/path and repair it if malformed. "
+            "If URL is malformed or over-encoded, normalize it and re-open the corrected URL immediately. "
             "Brute-force execution policy: if blocked by cookie, sign-in, promo, feedback, or modal overlays, close or dismiss them. "
             "If the page errors, refresh once and retry the required action sequence. "
             "If navigation fails, return to the URL and continue until the objective is completed."
