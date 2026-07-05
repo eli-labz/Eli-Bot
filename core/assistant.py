@@ -216,7 +216,12 @@ def _run_bruteforce_action(action_text):
     if re.match(r"^(https?://|www\.)\S+$", raw, flags=re.IGNORECASE) or re.match(
         r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+(?:/\S*)?$", raw, flags=re.IGNORECASE
     ):
-        activate_windowt_title(raw)
+        _execute_any_url_end_to_end(raw, f"Open this URL and complete the requested objective end-to-end: {raw}")
+        return
+
+    extracted_url = _extract_any_url_from_text(raw)
+    if extracted_url:
+        _execute_any_url_end_to_end(extracted_url, raw)
         return
 
     # Direct command families first: deterministic and fast.
@@ -263,6 +268,41 @@ def _run_bruteforce_action(action_text):
     # Last fallback: let full planner generate a recoverable multi-step sequence.
     print("Brute-force fallback: escalating to assistant planner")
     assistant(assistant_goal=raw, called_from="assistant")
+
+
+def _extract_any_url_from_text(text: str) -> str:
+    raw = str(text or "")
+    url_pattern = re.compile(
+        r"((?:https?://|www\.)[^\s]+|[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+(?:/[^\s]*)?)",
+        flags=re.IGNORECASE,
+    )
+    match = url_pattern.search(raw)
+    if not match:
+        return ""
+    return match.group(1).rstrip(").,;:!?")
+
+
+def _execute_any_url_end_to_end(url: str, objective_prompt: str) -> bool:
+    clean_url = str(url or "").strip().strip('"').strip("'")
+    if not clean_url:
+        return False
+
+    speaker("Opening URL in Microsoft Edge and executing end-to-end.")
+    activate_windowt_title(clean_url)
+    time.sleep(1.2)
+
+    assistant(
+        assistant_goal=(
+            "Control Microsoft Edge end-to-end on this URL: "
+            f"{clean_url}. "
+            f"User objective: {objective_prompt}. "
+            "Brute-force execution policy: if blocked by cookie, sign-in, promo, feedback, or modal overlays, close or dismiss them. "
+            "If the page errors, refresh once and retry the required action sequence. "
+            "If navigation fails, return to the URL and continue until the objective is completed."
+        ),
+        called_from="assistant",
+    )
+    return True
 
 
 def _looks_like_expedia_trip_request(normalized_prompt: str) -> bool:
