@@ -34,6 +34,14 @@ SW_SHOW = 5
 
 
 def _find_edge_executable():
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe") as key:
+            app_path, _ = winreg.QueryValueEx(key, None)
+            if app_path:
+                return app_path
+    except Exception:
+        pass
+
     msedge_path = shutil.which("msedge.exe")
     edge_candidates = [
         msedge_path or "",
@@ -42,7 +50,7 @@ def _find_edge_executable():
         os.path.join(os.environ.get("LocalAppData", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
     ]
     for edge_path in edge_candidates:
-        if edge_path and os.path.exists(edge_path):
+        if edge_path:
             return edge_path
     return ""
 
@@ -76,9 +84,10 @@ def _candidate_urls_for_healing(value):
     if not raw:
         return []
 
-    # Fix common malformed scheme variants.
+    # Fix common malformed scheme variants without corrupting valid '://'.
     fixed = raw.replace("http:///", "http://").replace("https:///", "https://")
-    fixed = fixed.replace("http:/", "http://").replace("https:/", "https://")
+    fixed = re.sub(r"^http:/([^/])", r"http://\1", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"^https:/([^/])", r"https://\1", fixed, flags=re.IGNORECASE)
     fixed = fixed.replace("http://https://", "https://").replace("https://http://", "http://")
 
     candidates = []
@@ -113,16 +122,36 @@ def _open_url_in_edge(url):
     normalized_url = _normalize_url(url)
     edge_exe = _find_edge_executable()
 
-    try:
-        if edge_exe:
-            subprocess.Popen([edge_exe, normalized_url])
+    launch_attempts = []
+    if edge_exe:
+        launch_attempts.append([edge_exe, normalized_url])
+
+    # Common CLI availability fallback.
+    launch_attempts.append(["msedge", normalized_url])
+
+    for command in launch_attempts:
+        try:
+            subprocess.Popen(command)
             return True
+        except Exception:
+            continue
+
+    # Shell-based fallback using Windows START command.
+    try:
+        subprocess.Popen(["cmd", "/c", "start", "", "msedge", normalized_url])
+        return True
     except Exception:
         pass
 
-    # Fallback via protocol in case the executable path is unavailable.
+    # Protocol fallback targeting Edge specifically.
     try:
         os.startfile(f"microsoft-edge:{normalized_url}")
+        return True
+    except Exception:
+        pass
+
+    try:
+        subprocess.Popen(["cmd", "/c", "start", "", f"microsoft-edge:{normalized_url}"])
         return True
     except Exception:
         return False
@@ -385,6 +414,16 @@ def find_best_match_window(partial_title, threshold=50):
 
 def activate_windowt_title(application_name):
     application_name = _sanitize_application_name(application_name)
+
+    # URL handling must never fall through to PATH/registry probing because query
+    # strings can be interpreted by the shell and break app lookup.
+    if _is_probable_url(application_name):
+        opened, healed_url = heal_and_open_url_in_edge(application_name)
+        if opened:
+            time.sleep(0.6)
+            return get_active_window_title()
+        print(f"ERROR: Failed to open URL in Edge: {healed_url or application_name}")
+        return get_active_window_title()
 
     if _launch_native_application(application_name):
         time.sleep(0.6)
