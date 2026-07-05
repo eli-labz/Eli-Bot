@@ -160,6 +160,11 @@ ACTION_ALIASES = {
     "scroll_to": "scroll_to",
 }
 
+URL_TOKEN_PATTERN = re.compile(
+    r"((?:https?://|www\.)[^\s]+|[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+(?:/[^\s]*)?)",
+    flags=re.IGNORECASE,
+)
+
 
 def _normalize_action_name(name):
     normalized = str(name).strip().lower().replace("-", "_").replace(" ", "_")
@@ -221,6 +226,15 @@ def _parse_instructions_json(raw_text):
     if 'actions' in instructions:
         return {"actions": _coerce_actions(instructions['actions'])}, "act"
     return {"actions": _coerce_actions([instructions])}, "act"
+
+
+def _extract_url_token(text):
+    if text is None:
+        return ""
+    match = URL_TOKEN_PATTERN.search(str(text))
+    if not match:
+        return ""
+    return match.group(1).rstrip(").,;:!?")
 
 
 def _retry_json_from_driver(raw_text, assistant_goal, app_name):
@@ -459,6 +473,9 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                 requested_app = str(step_description).strip() if step_description is not None else ""
                 if not requested_app or requested_app.lower() in {"no step description provided.", "none", "null"}:
                     requested_app = get_application_title(original_goal)
+                extracted_url = _extract_url_token(requested_app)
+                if extracted_url:
+                    requested_app = extracted_url
                 app_name = activate_windowt_title(requested_app)
                 print(f"New app selected and analyzing: {app_name}")
             elif action == "double_click_element":

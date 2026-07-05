@@ -5,6 +5,7 @@ import sys
 import time
 import winreg
 import shutil
+import re
 from fuzzywuzzy import fuzz
 import pygetwindow as gw
 import uiautomation as auto
@@ -31,6 +32,62 @@ SW_RESTORE = 9
 SW_SHOW = 5
 
 
+def _find_edge_executable():
+    msedge_path = shutil.which("msedge.exe")
+    edge_candidates = [
+        msedge_path or "",
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(os.environ.get("LocalAppData", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+    ]
+    for edge_path in edge_candidates:
+        if edge_path and os.path.exists(edge_path):
+            return edge_path
+    return ""
+
+
+def _is_probable_url(value):
+    text = str(value or "").strip().strip('"').strip("'")
+    if not text or " " in text:
+        return False
+    if "\\" in text:
+        return False
+    if text.lower().endswith((".exe", ".bat", ".cmd", ".py")):
+        return False
+
+    if re.match(r"^https?://", text, flags=re.IGNORECASE):
+        return True
+    if text.lower().startswith("www."):
+        return True
+    return bool(re.match(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+([/:?#].*)?$", text, flags=re.IGNORECASE))
+
+
+def _normalize_url(value):
+    text = str(value or "").strip().strip('"').strip("'")
+    if re.match(r"^https?://", text, flags=re.IGNORECASE):
+        return text
+    return f"https://{text}"
+
+
+def _open_url_in_edge(url):
+    normalized_url = _normalize_url(url)
+    edge_exe = _find_edge_executable()
+
+    try:
+        if edge_exe:
+            subprocess.Popen([edge_exe, normalized_url])
+            return True
+    except Exception:
+        pass
+
+    # Fallback via protocol in case the executable path is unavailable.
+    try:
+        os.startfile(f"microsoft-edge:{normalized_url}")
+        return True
+    except Exception:
+        return False
+
+
 def _sanitize_application_name(application_name):
     return str(application_name or "").strip().strip('"').strip("'")
 
@@ -40,28 +97,22 @@ def _launch_native_application(application_name):
     if not app:
         return False
 
+    if _is_probable_url(app):
+        return _open_url_in_edge(app)
+
     lowered = app.lower()
     if lowered in {"file explorer", "windows explorer", "explorer", "this pc"}:
         subprocess.Popen(["explorer.exe"])
         return True
 
     if lowered in {"edge", "microsoft edge", "browser", "web browser", "internet browser"}:
-        msedge_path = shutil.which("msedge.exe")
-        edge_candidates = [
-            msedge_path or "",
-            os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
-            os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
-            os.path.join(os.environ.get("LocalAppData", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
-        ]
-        for edge_path in edge_candidates:
-            if not edge_path:
-                continue
+        edge_exe = _find_edge_executable()
+        if edge_exe:
             try:
-                if os.path.exists(edge_path):
-                    subprocess.Popen([edge_path])
-                    return True
+                subprocess.Popen([edge_exe])
+                return True
             except Exception:
-                continue
+                pass
 
     if lowered.endswith(".exe"):
         try:

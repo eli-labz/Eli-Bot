@@ -6,6 +6,7 @@ import os
 from queue import Queue
 import speech_recognition as sr
 import threading
+import re
 from env_loader import load_env
 from voice import speaker, set_volume, set_subtitles
 from driver import assistant, act, fast_act, auto_role, perform_simulated_keypress, write_action
@@ -205,6 +206,12 @@ def _run_bruteforce_action(action_text):
         return
 
     normalized = raw.lower()
+
+    if re.match(r"^(https?://|www\.)\S+$", raw, flags=re.IGNORECASE) or re.match(
+        r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+(?:/\S*)?$", raw, flags=re.IGNORECASE
+    ):
+        activate_windowt_title(raw)
+        return
 
     # Direct command families first: deterministic and fast.
     if normalized.startswith("open ") or normalized.startswith("launch "):
