@@ -377,4 +377,74 @@ Artificially Assisted User Interface Testing harnesses the power of artificial i
 
 In conclusion, Artificially Assisted User Interface Testing represents a significant leap forward in software quality assurance. By automating and enhancing the testing process, AI-driven tools offer improved accuracy, speed, and coverage, paving the way for more reliable and user-friendly applications.
 
+---
+
+## Edge Actions (Optional Module)
+
+Eli Bot now includes an optional long-horizon Microsoft Edge action system under `core/edge_actions`.
+
+This capability is feature-flagged and does not change default Eli behavior unless explicitly enabled.
+
+### Feature Flag
+
+Set:
+
+`ELI_EDGE_ACTIONS_ENABLED=true`
+
+Optional settings:
+
+- `ELI_EDGE_ACTIONS_HEADLESS=false`
+- `ELI_EDGE_ACTIONS_CHANNEL=msedge`
+- `ELI_EDGE_ACTIONS_MAX_STEPS=40`
+- `ELI_EDGE_ACTIONS_TRACE_DIR=edge_action_traces`
+
+### Playwright Requirement
+
+Edge Actions uses Playwright when enabled.
+
+Install once:
+
+```powershell
+pip install playwright
+playwright install
+```
+
+### Run From CLI
+
+```powershell
+python -m core.edge_actions run --task-id competitor_pricing_comparison --input company=ExampleCo --input objective="Compare pricing"
+```
+
+### What It Does
+
+- Observes live Edge state
+- Plans a bounded next action
+- Executes browser action primitives
+- Verifies each action outcome
+- Applies risk policy and approval gates
+- Writes structured audit trace output
+- Uses an AutoResearch adapter for research context
+
+### Task Catalog
+
+The module ships with a data-driven catalog of 100 long-horizon Edge task templates in `core/edge_actions/task_catalog.py`.
+
+Each task includes:
+
+- success criteria
+- allowed actions
+- forbidden actions
+- approval-required actions
+- verification steps
+- recovery behavior
+- timeout behavior
+
+### Tests
+
+Run new module tests:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+```
+
 

@@ -3,7 +3,8 @@ pywinauto
 pyautogui
 pygetwindow
 customtkinter
-openai
+torch
+transformers
 Pillow  # This is the PIL (Python Imaging Library) package
 speechRecognition
 requests

@@ -6,10 +6,26 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"  # Hide pygame's welcome messa
 import pygame
 import tkinter as tk
 
-# Initialize Pygame's mixer
-pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=4096)
 volume = 0.25
 subtitles = True
+_AUDIO_READY = False
+_AUDIO_INIT_ERROR = None
+
+
+def _ensure_audio_ready():
+    global _AUDIO_READY, _AUDIO_INIT_ERROR
+    if _AUDIO_READY:
+        return True
+    if _AUDIO_INIT_ERROR:
+        return False
+    try:
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=4096)
+        _AUDIO_READY = True
+        return True
+    except Exception as e:
+        _AUDIO_INIT_ERROR = e
+        print(f"Audio init failed. Continuing without audio playback: {e}")
+        return False
 
 class TransparentSubtitlesWindow:
     def __init__(self, text):
@@ -56,22 +72,31 @@ def play_audio(file_path, text, lang='en'):
     # Estimate the duration the subtitles should be shown
     duration = calculate_duration_of_speech(text, lang)
 
-    # Load and play audio file
-    pygame.mixer.music.load(file_path)
-    pygame.mixer.music.set_volume(volume)
-    pygame.mixer.music.play()
+    if not _ensure_audio_ready():
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        return
 
-    # When the audio finishes, stop the mixer and remove the temporary file
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
-    pygame.mixer.music.unload()
-    os.remove(file_path)
+    try:
+        # Load and play audio file
+        pygame.mixer.music.load(file_path)
+        pygame.mixer.music.set_volume(volume)
+        pygame.mixer.music.play()
+
+        # When the audio finishes, stop the mixer and remove the temporary file
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+        pygame.mixer.music.unload()
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 def set_volume(volume_level):
     global volume
     volume = volume_level
-    pygame.mixer.music.set_volume(volume)
+    if _ensure_audio_ready():
+        pygame.mixer.music.set_volume(volume)
 
 def set_subtitles(subtitles_bool):
     global subtitles
@@ -79,35 +104,38 @@ def set_subtitles(subtitles_bool):
 
 
 def speaker(text, lang='en'):
-    # Initialize all of pygame's modules
-    pygame.init()
+    def run_tts_pipeline():
+        pygame.init()
 
-    # Temporary mp3 file creation
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
-        tts = gTTS(text=text, lang=lang)
-        tts.save(fp.name)
-        temp_file_path = fp.name
+        temp_file_path = None
+        try:
+            # Temporary mp3 file creation
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
+                temp_file_path = fp.name
 
-    # Start the subtitles thread
-    if subtitles is True:
-        def setup_subtitles():
-            window = TransparentSubtitlesWindow(text)
-            window.change_text(text, calculate_duration_of_speech(text, lang))
-            window.root.mainloop()
+            tts = gTTS(text=text, lang=lang)
+            tts.save(temp_file_path)
 
-        subtitles_thread = threading.Thread(target=setup_subtitles)
-        subtitles_thread.daemon = True  # Now the thread will close when the main program exits
-        subtitles_thread.start()
-    else:
-        subtitles_thread = None
+            # Start the subtitles thread
+            if subtitles is True:
+                def setup_subtitles():
+                    window = TransparentSubtitlesWindow(text)
+                    window.change_text(text, calculate_duration_of_speech(text, lang))
+                    window.root.mainloop()
 
-    # Start the audio thread
-    audio_thread = threading.Thread(target=play_audio, args=(temp_file_path, text, lang))
-    audio_thread.daemon = True
-    audio_thread.start()
+                subtitles_thread = threading.Thread(target=setup_subtitles, daemon=True)
+                subtitles_thread.start()
 
-    # Return the threads in case the caller wants to track them
-    return audio_thread, subtitles_thread
+            play_audio(temp_file_path, text, lang)
+        except Exception as e:
+            print(f"Speaker pipeline error: {e}")
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+    # Run the entire TTS pipeline asynchronously to avoid blocking the UI thread.
+    worker_thread = threading.Thread(target=run_tts_pipeline, daemon=True)
+    worker_thread.start()
+    return worker_thread, None
 
 
 if __name__ == '__main__':

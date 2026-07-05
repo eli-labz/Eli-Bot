@@ -2,12 +2,17 @@ import customtkinter as Ctk
 from PIL import Image, ImageTk
 import time
 import random
+import os
 from queue import Queue
 import speech_recognition as sr
 import threading
+from env_loader import load_env
 from voice import speaker, set_volume, set_subtitles
 from driver import assistant, act, fast_act, auto_role, perform_simulated_keypress, write_action
 from window_focus import activate_windowt_title
+
+
+load_env()
 
 # Initialize the speech recognition and text to speech engines
 assistant_voice_recognition_enabled = True  # Disable if you don't want to use voice recognition
@@ -82,13 +87,10 @@ def end_drag(event):
         position_bottom = root.winfo_y()
         label.configure(image=assistant_photo)
         animate_move()
-        show_message(event, dragged_message)
-        speaker(dragged_message)
+        create_input_bubble(action=True)
     else:
         label.configure(image=assistant_photo)
         animate_move()  # Resume the movement animation
-        show_message(event, dragged_message)
-        speaker(dragged_message)
         create_input_bubble(action=True)
     print(f"Clicked on the assistant: {dragged_message}")
 
@@ -103,21 +105,33 @@ def create_input_bubble(action=False):
     # Create bubble as a top-level window
     bubble = Ctk.CTkToplevel(root)
     bubble.attributes('-alpha', 0.85)
-    bubble.bind("<Escape>", lambda e: bubble.destroy())
-    bubble.bind("<FocusOut>", lambda e: bubble.destroy())
-    bubble.overrideredirect(True)
+    bubble.overrideredirect(False)
     bubble.attributes('-topmost', True)
     bubble.geometry(f'{bubble_width}x{bubble_height}+{bubble_x}+{bubble_y}')
+
+    def _close_bubble(_event=None):
+        try:
+            bubble.grab_release()
+        except Ctk.ctk_tk.TclError:
+            pass
+        bubble.destroy()
+
+    bubble.bind("<Escape>", _close_bubble)
     # Create the entry widget
     entry = Ctk.CTkEntry(bubble, corner_radius=6, placeholder_text_color="#0b2d39",
                          fg_color="#e1f2f1", text_color="#040f13",
                          placeholder_text="Type here the action to perform...", width=450,
                          border_width=1, border_color="darkgray")
-    entry.bind("<Escape>", lambda e: bubble.destroy())
+    entry.bind("<Escape>", _close_bubble)
     entry.pack(padx=0, pady=0)
+
+    try:
+        bubble.grab_set()
+    except Ctk.ctk_tk.TclError:
+        pass
     # Force focus on the entry and bubble
     try:
-        bubble.after(10, lambda: [bubble.focus_force(), entry.focus_force()])
+        bubble.after(10, lambda: [bubble.lift(), bubble.focus_force(), entry.focus_force()])
     except Ctk.ctk_tk.TclError:
         # Ignore the error, as the window or widget is no longer valid
         pass
@@ -132,14 +146,23 @@ def create_input_bubble(action=False):
 def process_input_and_close(bubble, entry, action=False):
     user_input = entry.get()
     print(f"Processing input: {user_input}")
-    if user_input.strip():
+
+    def _destroy_bubble():
+        try:
+            bubble.grab_release()
+        except Ctk.ctk_tk.TclError:
+            pass
         bubble.destroy()
+
+    if user_input.strip():
+        _destroy_bubble()
         # Use the user input as needed: display, speech, or further processing.
         show_message(None, user_input)
         # speaker(user_input.strip())
         if action:
             print("Performing action: ", user_input)
-            fast_act(single_step=user_input.strip())
+            action_thread = threading.Thread(target=run_fast_action, args=(user_input.strip(),), daemon=True)
+            action_thread.start()
         else:
             print(f"Running assistant... Generating test case: {user_input.strip()}")
             speaker(f"Running assistant... Generating test case: {user_input.strip()}")
@@ -148,7 +171,7 @@ def process_input_and_close(bubble, entry, action=False):
             assistant_thread.start()
             # assistant(user_input.strip())
         # auto_prompt(user_input.strip())
-    bubble.destroy()  # Ensure the bubble is destroyed after submission
+    _destroy_bubble()  # Ensure the bubble is destroyed after submission
 
 def listen_and_respond():
     action = listen_to_speech()
@@ -162,6 +185,110 @@ def listen_and_respond():
 def run_assistant(action):
     print("Running assistant...")
     assistant(assistant_goal=action, called_from="assistant")
+
+
+def run_fast_action(action_text):
+    print("Running fast action...")
+    try:
+        _run_bruteforce_action(action_text)
+    except Exception as e:
+        print(f"Fast action failed: {e}")
+        message_queue.put("Action failed. Check console logs.")
+
+
+def _run_bruteforce_action(action_text):
+    raw = str(action_text or "").strip()
+    if not raw:
+        return
+
+    if _try_edge_actions(raw):
+        return
+
+    normalized = raw.lower()
+
+    # Direct command families first: deterministic and fast.
+    if normalized.startswith("open ") or normalized.startswith("launch "):
+        target = raw.split(" ", 1)[1].strip() if " " in raw else raw
+        activate_windowt_title(target)
+        return
+
+    if normalized.startswith("press "):
+        perform_simulated_keypress(raw.split(" ", 1)[1].strip())
+        return
+
+    if normalized.startswith("type ") or normalized.startswith("write "):
+        payload = raw.split(" ", 1)[1].strip() if " " in raw else ""
+        if payload:
+            write_action(goal=payload, last_step="text_entry")
+        return
+
+    if normalized.startswith("scroll"):
+        import pyautogui
+        pyautogui.scroll(-850)
+        return
+
+    # Brute-force click-oriented execution paths.
+    attempts = [
+        {"double_click": False, "right_click": False},
+        {"double_click": True, "right_click": False},
+        {"double_click": False, "right_click": True},
+    ]
+
+    for idx, attempt in enumerate(attempts, start=1):
+        try:
+            print(f"Brute-force attempt {idx}: {attempt}")
+            result = fast_act(
+                single_step=raw,
+                double_click=attempt["double_click"],
+                right_click=attempt["right_click"],
+            )
+            if result:
+                return
+        except Exception as e:
+            print(f"Brute-force attempt {idx} failed: {e}")
+
+    # Last fallback: let full planner generate a recoverable multi-step sequence.
+    print("Brute-force fallback: escalating to assistant planner")
+    assistant(assistant_goal=raw, called_from="assistant")
+
+
+def _try_edge_actions(raw_action: str) -> bool:
+    if str(os.environ.get("ELI_EDGE_ACTIONS_ENABLED", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+
+    normalized = raw_action.strip().lower()
+    task_id = ""
+    prefixed = (
+        normalized.startswith("edge task ")
+        or normalized.startswith("browser task ")
+        or normalized.startswith("edge run ")
+    )
+
+    if prefixed:
+        if " " in normalized:
+            parts = raw_action.split(" ", 2)
+            task_id = parts[2].strip() if len(parts) >= 3 else ""
+        if not task_id:
+            message_queue.put("Edge Actions enabled, but task id was missing.")
+            return True
+    else:
+        try:
+            from edge_actions.task_catalog import resolve_task_id_from_text
+            task_id = resolve_task_id_from_text(raw_action) or ""
+        except Exception:
+            task_id = ""
+
+        if not task_id:
+            return False
+
+    try:
+        from edge_actions import EdgeActionRunner
+        runner = EdgeActionRunner()
+        result = runner.run_task(task_id=task_id, inputs={"objective": raw_action})
+        message_queue.put(f"Edge task finished: {result.get('status')} ({result.get('trace_path')})")
+    except Exception as e:
+        message_queue.put(f"Edge task failed: {e}")
+    return True
 
 
 def start_drag(event):

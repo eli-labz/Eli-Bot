@@ -4,6 +4,7 @@ import ctypes
 import sys
 import time
 import winreg
+import shutil
 from fuzzywuzzy import fuzz
 import pygetwindow as gw
 import uiautomation as auto
@@ -28,6 +29,58 @@ ShowWindow = user32.ShowWindow
 # Constants for ShowWindow function
 SW_RESTORE = 9
 SW_SHOW = 5
+
+
+def _sanitize_application_name(application_name):
+    return str(application_name or "").strip().strip('"').strip("'")
+
+
+def _launch_native_application(application_name):
+    app = _sanitize_application_name(application_name)
+    if not app:
+        return False
+
+    lowered = app.lower()
+    if lowered in {"file explorer", "windows explorer", "explorer", "this pc"}:
+        subprocess.Popen(["explorer.exe"])
+        return True
+
+    if lowered in {"edge", "microsoft edge", "browser", "web browser", "internet browser"}:
+        msedge_path = shutil.which("msedge.exe")
+        edge_candidates = [
+            msedge_path or "",
+            os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(os.environ.get("LocalAppData", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        ]
+        for edge_path in edge_candidates:
+            if not edge_path:
+                continue
+            try:
+                if os.path.exists(edge_path):
+                    subprocess.Popen([edge_path])
+                    return True
+            except Exception:
+                continue
+
+    if lowered.endswith(".exe"):
+        try:
+            if os.path.isabs(app):
+                subprocess.Popen([app])
+            else:
+                subprocess.Popen([app], shell=True)
+            return True
+        except Exception as e:
+            print(f"ERROR: Error opening executable '{app}': {e}")
+
+    if os.path.isabs(app) and os.path.exists(app):
+        try:
+            os.startfile(app)
+            return True
+        except Exception as e:
+            print(f"ERROR: Error opening native path '{app}': {e}")
+
+    return False
 
 def get_installed_apps_registry():
     installed_apps = []
@@ -227,6 +280,12 @@ def find_best_match_window(partial_title, threshold=50):
 #     return get_active_window_title()
 
 def activate_windowt_title(application_name):
+    application_name = _sanitize_application_name(application_name)
+
+    if _launch_native_application(application_name):
+        time.sleep(0.6)
+        return get_active_window_title()
+
     if application_name.lower() == "cmd":
         # If we know it's cmd, we can try activating an existing window or start a new one directly
         hwnd, window_title = find_window_by_title("cmd")
@@ -258,6 +317,9 @@ def activate_windowt_title(application_name):
             app_path = search_registry_for_application(word)
             if app_path:
                 break  # Once we have found a path, we can break the loop
+
+    if not app_path and application_name.lower().endswith(".exe"):
+        app_path = application_name
 
     hwnd, window_title = None, None
     # Attempt to find the window with a partial match for any of the words

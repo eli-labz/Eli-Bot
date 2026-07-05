@@ -5,7 +5,9 @@ from window_elements import analyze_app
 from topmost_window import focus_topmost_window
 from core_imaging import imaging
 from last_app import last_programs_list
-from core_api import api_call
+from core_api import api_call, api_call_json
+from autoresearch_bridge import get_autoresearch_policy_context
+from env_loader import load_env
 from voice import speaker
 import pygetwindow as gw
 import win32process
@@ -20,6 +22,9 @@ import re
 import warnings
 warnings.simplefilter("ignore", UserWarning)
 from pywinauto import Application
+
+
+load_env()
 
 
 low_data_mode = True  # Avoids the usage of visioning after the case generation. Lowers the accuracy but is way faster.
@@ -104,6 +109,137 @@ json_case_example = r'''```json
         }
       ]
     }```'''
+
+
+CANONICAL_ACTIONS = {
+    "click_element",
+    "press_key",
+    "text_entry",
+    "open_app",
+    "move_window",
+    "time_sleep",
+    "right_click_element",
+    "double_click_element",
+    "hold_key_and_click",
+    "scroll_to",
+}
+
+ACTION_ALIASES = {
+    "click": "click_element",
+    "click_element": "click_element",
+    "press": "press_key",
+    "press_key": "press_key",
+    "key": "press_key",
+    "hotkey": "press_key",
+    "text": "text_entry",
+    "type": "text_entry",
+    "write": "text_entry",
+    "input": "text_entry",
+    "text_entry": "text_entry",
+    "open": "open_app",
+    "open_app": "open_app",
+    "launch": "open_app",
+    "launch_app": "open_app",
+    "run": "open_app",
+    "run_app": "open_app",
+    "open_file_explorer": "open_app",
+    "file_explorer": "open_app",
+    "explorer": "open_app",
+    "move": "move_window",
+    "move_window": "move_window",
+    "sleep": "time_sleep",
+    "wait": "time_sleep",
+    "time_sleep": "time_sleep",
+    "right_click": "right_click_element",
+    "right_click_element": "right_click_element",
+    "double_click": "double_click_element",
+    "double_click_element": "double_click_element",
+    "hold_click": "hold_key_and_click",
+    "hold_key_and_click": "hold_key_and_click",
+    "scroll": "scroll_to",
+    "scroll_to": "scroll_to",
+}
+
+
+def _normalize_action_name(name):
+    normalized = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+    return ACTION_ALIASES.get(normalized, normalized)
+
+
+def _coerce_actions(raw_actions):
+    coerced = []
+    for item in raw_actions:
+        if isinstance(item, str):
+            coerced.append({"act": "text_entry", "step": item})
+            continue
+
+        if not isinstance(item, dict):
+            coerced.append({"act": "text_entry", "step": str(item)})
+            continue
+
+        action_field = item.get("act") or item.get("action") or item.get("type") or item.get("command")
+        if action_field:
+            act = _normalize_action_name(action_field)
+            if act not in CANONICAL_ACTIONS:
+                act = "click_element"
+            step = (
+                item.get("step")
+                or item.get("details")
+                or item.get("value")
+                or item.get("text")
+                or item.get("target")
+                or "No step description provided."
+            )
+            if act == "open_app" and str(step).strip().lower() in {"", "none", "null", "open_file_explorer", "file_explorer", "explorer"}:
+                step = "File Explorer"
+            coerced.append({"act": act, "step": str(step)})
+            continue
+
+        matched = False
+        for key, value in item.items():
+            act = _normalize_action_name(key)
+            if act in CANONICAL_ACTIONS:
+                normalized_value = value
+                if act == "open_app" and str(value).strip().lower() in {"", "none", "null", "open_file_explorer", "file_explorer", "explorer"}:
+                    normalized_value = "File Explorer"
+                coerced.append({"act": act, "step": str(normalized_value)})
+                matched = True
+
+        if not matched:
+            coerced.append({"act": "click_element", "step": str(item)})
+
+    return coerced
+
+
+def _parse_instructions_json(raw_text):
+    cleaned = raw_text.strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+    instructions = json.loads(cleaned)
+    if isinstance(instructions, list):
+        return {"actions": _coerce_actions(instructions)}, "act"
+    if 'actions' in instructions:
+        return {"actions": _coerce_actions(instructions['actions'])}, "act"
+    return {"actions": _coerce_actions([instructions])}, "act"
+
+
+def _retry_json_from_driver(raw_text, assistant_goal, app_name):
+    retry_messages = [
+        {
+            "role": "assistant",
+            "content": "You convert malformed planner output into valid JSON only.",
+        },
+        {
+            "role": "system",
+            "content": (
+                f"Goal: {assistant_goal}\n"
+                f"Focused window: {app_name}\n"
+                "Return valid minified JSON only with either {\"actions\":[...]} or a single {\"act\":...,\"step\":...}.\n"
+                f"Malformed output:\n{raw_text}"
+            ),
+        },
+    ]
+    return api_call_json(retry_messages, model_name="gpt-4-1106-preview", max_tokens=600, temperature=0.1, retries=1)
 
 
 # Here you can load successful trained models to perform the task. ToDo: Use the database.
@@ -243,6 +379,7 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
 
     # 'execute_json_case' is the JSON test case to execute. If no JSON is provided, generate a new one.
     if not execute_json_case:
+        autoresearch_context = get_autoresearch_policy_context()
         print(f"\nGenerating a test case with the assistant. Image visioning started. Analyzing the application {app_name} for context.\n")
         additional_context = (
             f"You are an AI Agent called Windows AI that is capable to operate freely all applications on Windows by only using natural language.\n"
@@ -273,10 +410,11 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                                     f"Use the following information to generate better steps:\n{app_space_map(assistant_goal, app_name, original_goal, map='app_space')}\n"
                                     f"Before the text_entry, use click_element to select the appropriate text input area element.\n"
                                     f"Do not combine steps, try to generate more useful steps. Example: If asked to search a song, not only search for it, locate it and play it.\n{keep_in_mind}"
+                                    f"\n{autoresearch_context}\n"
                                     f"Do not respond 'As an AI language model, I am unable to...' as you are actually capable."},
                         {"role": "system",
                          "content": f"Focused window: \"{app_name}\"\nGoal: {assistant_goal}"}, ]
-        step_analysis = api_call(step_creator, model_name="gpt-4-1106-preview", max_tokens=4095, temperature=1.0)
+        step_analysis = api_call_json(step_creator, model_name="gpt-4-1106-preview", max_tokens=1200, temperature=0.2, retries=1)
         print(f"The assistant created the following test case scenario:\n{step_analysis}\n")
         speaker(f"Test case generated. Executing the generated test case.")
     else:
@@ -286,24 +424,17 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
     # Processing the latest JSON data from the JSON testcase:
     if step_analysis:
         try:
-            if """```json""" in step_analysis:
-                # Removing the leading ```json\n
-                step_analysis = step_analysis.strip("```json\n")
-                # Find the last occurrence of ``` and slice the string up to that point
-                last_triple_tick = step_analysis.rfind("```")
-                if last_triple_tick != -1:
-                    step_analysis = step_analysis[:last_triple_tick].strip()
-                step_analysis_cleaned = step_analysis
-                instructions = json.loads(step_analysis_cleaned)
-                executor = "act"
-            else:
-                instructions = json.loads(step_analysis)
-                instructions['actions'] = instructions.pop('actions')
-                executor = "act"
+            instructions, executor = _parse_instructions_json(step_analysis)
         except json.JSONDecodeError as e:
-            speaker(f"ERROR: Invalid JSON data provided: {e}")
-            time.sleep(15)
-            raise Exception(f"ERROR: Invalid JSON data provided: {e}")
+            print(f"Planner JSON parse failed, retrying once with repair prompt: {e}")
+            try:
+                repaired = _retry_json_from_driver(step_analysis, assistant_goal, app_name)
+                instructions, executor = _parse_instructions_json(repaired)
+                step_analysis = repaired
+            except Exception:
+                speaker(f"ERROR: Invalid JSON data provided: {e}")
+                time.sleep(15)
+                raise Exception(f"ERROR: Invalid JSON data provided: {e}")
         if 'actions' in instructions:
             action_list = instructions['actions']
         else:
@@ -325,7 +456,10 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                     single_step=f"{step_description}", app_name=app_name, screen_analysis=assistant_goal, original_goal=original_goal, assistant_goal=assistant_goal), step_description)
                 database_add_case(database_file, app_name, assistant_goal, updated_instructions)  #  Print the entire database with # print_database(database_file)
             elif action == "open_app":
-                app_name = activate_windowt_title(get_application_title(step_description))
+                requested_app = str(step_description).strip() if step_description is not None else ""
+                if not requested_app or requested_app.lower() in {"no step description provided.", "none", "null"}:
+                    requested_app = get_application_title(original_goal)
+                app_name = activate_windowt_title(requested_app)
                 print(f"New app selected and analyzing: {app_name}")
             elif action == "double_click_element":
                 print(f"Double clicking on: {step_description}")
@@ -476,7 +610,7 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                                                  {"role": "system", "content": f"Do not modify the steps before \"Step {i-1}: {action-1}, {step_description-1}\", modify all next steps from the step \"Step {i-1}: {action-1}, {step_description-1}\" to achieve the goal: \"{newest_goal}\"\n"
                                                                                f"Do not combine steps, try to generate more useful steps. Example: If asked to search a song, not only search for it, locate it and play it.\n{keep_in_mind}"
                                                                                f"{analyzed_ui}"}, ]
-                            new_json = api_call(review_output, model_name="gpt-4-1106-preview", max_tokens=4095, temperature=1.0)
+                            new_json = api_call_json(review_output, model_name="gpt-4-1106-preview", max_tokens=1200, temperature=0.2, retries=1)
                             print("The assistant said:\n", step_analysis)
 
                             print("Modifying the old json testcase with the new_json.")
@@ -484,21 +618,13 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
 
                             app_name = activate_windowt_title(get_application_title(newest_goal))
                             # Processing the latest JSON data from the JSON testcase.
-                            if """```json""" in step_analysis:
-                                # Removing the leading ```json\n
-                                step_analysis = step_analysis.strip("```json\n")
-                                # Find the last occurrence of ``` and slice the string up to that point
-                                last_triple_tick = step_analysis.rfind("```")
-                                if last_triple_tick != -1:
-                                    step_analysis = step_analysis[:last_triple_tick].strip()
-                                step_analysis_cleaned = step_analysis
-                                instructions = json.loads(step_analysis_cleaned)
-                                executor = "act"
-                            else:
-                                instructions = json.loads(step_analysis)
-                                instructions['actions'] = instructions.pop('actions')
-                                executor = "act"
+                            try:
+                                instructions, executor = _parse_instructions_json(step_analysis)
                                 print(f"Updated Instructions: {instructions}")
+                            except json.JSONDecodeError as e:
+                                repaired = _retry_json_from_driver(step_analysis, assistant_goal, app_name)
+                                instructions, executor = _parse_instructions_json(repaired)
+                                step_analysis = repaired
                             pass
                         else:
                             print("No new goal.")
@@ -901,7 +1027,7 @@ def get_application_title(goal="", last_step=None, actual_step=None, focus_windo
         print(f"Getting the application name from the actual step: {actual_step}")
     goal_app = [{"role": "assistant",
                  "content": f"You are an AI assistant called App Selector that receives a list of programs and responds only respond with the best match  "
-                            f"program of the goal. Only respond with the window name or the program name. For search engines and social networks use Firefox or Chrome.\n"
+                            f"program of the goal. Only respond with the window name or the program name. For search engines and social networks use Microsoft Edge.\n"
                             f"Open programs:\n{last_programs_list(focus_last_window=focus_window)}"},
                 {"role": "system", "content": f"Goal: {goal}\nAll installed programs:\n{get_installed_apps_registry()}"}]
     app_name = api_call(goal_app, model_name="gpt-4-1106-preview", max_tokens=100)
@@ -914,6 +1040,8 @@ def get_application_title(goal="", last_step=None, actual_step=None, focus_windo
         app_name = "cmd"
     elif "calculator" in app_name.lower():
         app_name = "calc"
+    elif app_name.lower() in {"edge", "browser", "web browser", "internet browser"}:
+        app_name = "Microsoft Edge"
     elif "sorry" in app_name:
         app_name = get_focused_window_details()[3].strip('.exe')
         print(f"Using the focused window \"{app_name}\" for context.")

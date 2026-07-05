@@ -1,23 +1,12 @@
-from openai import OpenAI
+from core_api import api_call
 
 class WindowClassifier:
     def __init__(self):
-        self.api_key = 'insert_your_api_key_here'
-        self.client = OpenAI(api_key=self.api_key)
-        self.model_name = 'gpt-3.5-turbo'
+        self.model_name = 'openbmb/MiniCPM5-1B'
 
     def _get_response(self, messages, max_tokens=50):
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                max_tokens=max_tokens
-            )
-            if response.choices and hasattr(response.choices[0], 'message'):
-                decision_message = response.choices[0].message
-                if hasattr(decision_message, 'content'):
-                    return decision_message.content.strip()
-            return None
+            return api_call(messages, model_name=self.model_name, max_tokens=max_tokens)
         except Exception as e:
             print(f"An error occurred: {e}")
             return None

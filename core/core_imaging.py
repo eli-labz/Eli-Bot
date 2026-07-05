@@ -4,12 +4,28 @@ import base64
 import requests
 import io
 from PIL import Image
+from core_api import api_call
 
 # Assuming that the `activate_window_title` function is defined in another module correctly
 from window_focus import activate_windowt_title
 
 # OpenAI API Key
 api_key = 'insert_your_api_key_here'
+
+
+def _local_imaging_fallback(additional_context):
+    messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "You are a Windows assistant. The image is unavailable. "
+                "Infer a concise best-effort response from the provided context only."
+            ),
+        },
+        {"role": "system", "content": str(additional_context or "")},
+    ]
+    content = api_call(messages, max_tokens=300, temperature=0.2)
+    return {"choices": [{"message": {"content": content or ""}}]}
 
 
 # Function to focus a window given its title
@@ -44,6 +60,9 @@ def encode_image(image_data):
 
 # Function to analyze an image using OpenAI API
 def analyze_image(base64_image, window_title, additional_context='What’s in this image?'):
+    if api_key == 'insert_your_api_key_here':
+        return _local_imaging_fallback(additional_context)
+
     # Your logic to call the OpenAI API
     headers = {
         "Content-Type": "application/json",
@@ -72,8 +91,12 @@ def analyze_image(base64_image, window_title, additional_context='What’s in th
         "max_tokens": 300
     }
 
-    response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-    return response.json()
+    try:
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return _local_imaging_fallback(additional_context)
 
 
 # Improved function to both capture and analyze a specific region screenshot
