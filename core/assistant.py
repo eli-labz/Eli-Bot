@@ -7,6 +7,8 @@ from queue import Queue
 import speech_recognition as sr
 import threading
 import re
+from datetime import datetime
+from urllib.parse import urlencode, quote_plus
 from env_loader import load_env
 from voice import speaker, set_volume, set_subtitles
 from driver import assistant, act, fast_act, auto_role, perform_simulated_keypress, write_action
@@ -207,6 +209,10 @@ def _run_bruteforce_action(action_text):
 
     normalized = raw.lower()
 
+    if _looks_like_expedia_trip_request(normalized):
+        if _plan_trip_on_expedia(raw):
+            return
+
     if re.match(r"^(https?://|www\.)\S+$", raw, flags=re.IGNORECASE) or re.match(
         r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+(?:/\S*)?$", raw, flags=re.IGNORECASE
     ):
@@ -257,6 +263,150 @@ def _run_bruteforce_action(action_text):
     # Last fallback: let full planner generate a recoverable multi-step sequence.
     print("Brute-force fallback: escalating to assistant planner")
     assistant(assistant_goal=raw, called_from="assistant")
+
+
+def _looks_like_expedia_trip_request(normalized_prompt: str) -> bool:
+    text = str(normalized_prompt or "").strip()
+    if not text:
+        return False
+
+    travel_keywords = (
+        "plan a trip",
+        "plan trip",
+        "book a trip",
+        "travel",
+        "vacation",
+        "flight",
+        "hotel",
+        "itinerary",
+    )
+    has_travel_intent = any(keyword in text for keyword in travel_keywords)
+    has_expedia = "expedia" in text
+    return has_expedia or has_travel_intent
+
+
+def _extract_trip_details(prompt: str):
+    text = str(prompt or "").strip()
+    lowered = text.lower()
+
+    details = {
+        "origin": "",
+        "destination": "",
+        "depart_date": "",
+        "return_date": "",
+        "adults": "1",
+    }
+
+    from_to_match = re.search(
+        r"\bfrom\s+([a-zA-Z .'-]+?)\s+to\s+([a-zA-Z .'-]+?)(?:[,.]|\s|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if from_to_match:
+        details["origin"] = from_to_match.group(1).strip()
+        details["destination"] = from_to_match.group(2).strip()
+    else:
+        to_from_match = re.search(
+            r"\bto\s+([a-zA-Z .'-]+?)\s+from\s+([a-zA-Z .'-]+?)(?:[,.]|\s|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if to_from_match:
+            details["destination"] = to_from_match.group(1).strip()
+            details["origin"] = to_from_match.group(2).strip()
+
+    adults_match = re.search(
+        r"\b(\d{1,2})\s+(adult|adults|traveler|travelers|people|persons)\b",
+        lowered,
+        flags=re.IGNORECASE,
+    )
+    if adults_match:
+        details["adults"] = adults_match.group(1)
+
+    depart_match = re.search(
+        r"\b(?:depart(?:ing)?|leave|leaving|on)\s+([a-zA-Z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if depart_match:
+        details["depart_date"] = _normalize_trip_date(depart_match.group(1))
+
+    return_match = re.search(
+        r"\b(?:return(?:ing)?|back\s+on)\s+([a-zA-Z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if return_match:
+        details["return_date"] = _normalize_trip_date(return_match.group(1))
+
+    return details
+
+
+def _normalize_trip_date(raw_date: str) -> str:
+    token = str(raw_date or "").strip()
+    if not token:
+        return ""
+
+    now = datetime.now()
+    date_formats = ["%B %d, %Y", "%b %d, %Y", "%B %d", "%b %d", "%m/%d/%Y", "%m/%d/%y", "%m/%d"]
+
+    for fmt in date_formats:
+        try:
+            parsed = datetime.strptime(token, fmt)
+            if "%Y" not in fmt and "%y" not in fmt:
+                parsed = parsed.replace(year=now.year)
+                if parsed.date() < now.date():
+                    parsed = parsed.replace(year=now.year + 1)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    return ""
+
+
+def _build_expedia_search_url(details) -> str:
+    origin = str(details.get("origin", "")).strip()
+    destination = str(details.get("destination", "")).strip()
+    depart_date = str(details.get("depart_date", "")).strip()
+    return_date = str(details.get("return_date", "")).strip()
+    adults = str(details.get("adults", "1")).strip() or "1"
+
+    if not origin or not destination or not depart_date:
+        return "https://www.expedia.com/Flights"
+
+    params = {
+        "trip": "roundtrip" if return_date else "oneway",
+        "leg1": f"from:{origin},to:{destination},departure:{depart_date}TANYT",
+        "options": f"cabinclass:economy,adults:{adults},children:0,seniors:0,infantinlap:Y",
+        "mode": "search",
+    }
+    if return_date:
+        return_origin = destination
+        return_destination = origin
+        params["leg2"] = f"from:{return_origin},to:{return_destination},departure:{return_date}TANYT"
+
+    query = urlencode(params, quote_via=quote_plus)
+    return f"https://www.expedia.com/Flights-Search?{query}"
+
+
+def _plan_trip_on_expedia(prompt: str) -> bool:
+    details = _extract_trip_details(prompt)
+    expedia_url = _build_expedia_search_url(details)
+
+    speaker("Planning your Expedia trip in Microsoft Edge.")
+    activate_windowt_title(expedia_url)
+    time.sleep(1.2)
+
+    # If details are incomplete, hand over to the full planner to finish form filling in Expedia.
+    if expedia_url.endswith("/Flights"):
+        assistant(
+            assistant_goal=(
+                "Use Microsoft Edge and Expedia.com to plan a trip from this user request: "
+                f"{prompt}. Fill all required Expedia flight fields and show viable options."
+            ),
+            called_from="assistant",
+        )
+    return True
 
 
 def _try_edge_actions(raw_action: str) -> bool:

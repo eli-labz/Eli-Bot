@@ -12,6 +12,7 @@ https://github.com/user-attachments/assets/70192d12-535b-4930-9827-59f9086d4d13
 *   **Self-Healing Workflows**: Auto-adjusts to UI changes (e.g., element ID shifts). Reducing maintenance overhead, making Eli Bot's algorithm future-proof.
 *   **AI/ML Integration**: Using NLP to generate scripts (e.g., “Automate Application” → plan of test execution steps in JSON) with self-correcting selectors.
 *   **Cross-Context Automation**: Seamlessly combining GUI, web, and API workflows in a Pythonic way, unifying disjointed automation methods (GUI, API, web) into a single framework.
+*   **Expedia Trip Planning via Edge**: From the text input bubble, Eli Bot can parse a travel prompt and open Microsoft Edge directly on Expedia with a prefilled trip search URL, then continue planning when details are incomplete.
 *   **Accessibility**: Enhancing accessibility for users with different needs, enabling voice or simple text commands to control complex actions. 
 *   **Generalization**: Elicits spatial cognition to understand and execute a wide range of commands in a natural, intuitive manner.
 *    **Small and compact**: Eli Bot functions as an example algorithm of a modular and generalized computer assistant framework that elicits spatial cognition.
@@ -121,6 +122,12 @@ ControlClick, x=152 y=311  # Fragile coordinates
 **Now**:  Only 1 natural language command.
 ```python
 assistant("Like this song")  # Language-first
+```
+
+Trip planning example (text field / fast action):
+```python
+# Opens Microsoft Edge on Expedia and builds a travel search from the prompt
+assistant("Plan a trip on Expedia from New York to Tokyo departing October 12 returning October 20 for 2 adults")
 ```
 
 | **Shift Metrics**:    | Traditional Tools | Eli Bot |
