@@ -1,5 +1,7 @@
 Eli Bot is the first open-source Artificial Narrow Intelligence to elicit spatial reasoning and perception as a generalist agentic framework Computer-Using-Agent that fully operates graphical-user-interfaces (GUIs) for Windows 10/11 **through direct OS-native semantic interaction**. It functions as a Computer-Using-Agent / Large-Action-Model, forming the foundation for a pure **symbolic spatial cognition framework** that enables artificial operation of a computer using only natural language, **without relying on computer vision, OCR, or pixel-level imaging**. Eli Bot emulates, plans, and simulates synthetic Human-Interface-Device (HID) interactions through **native Windows Accessibility APIs**, eliciting human-like abstraction across geometric, hierarchical, and temporal dimensions at an Operating-System level. This OS-integrated approach simulating spatial utilization of a computer provides a future-proof, generalized, modular, and dynamic ANI orchestration framework for multi-agent-driven automation, marking an important step in symbolic reasoning towards AGI.
 
+https://github.com/user-attachments/assets/70192d12-535b-4930-9827-59f9086d4d13
+
 **Key Features:**
 *   **Not relying only on Imaging Pipeline**: Operates exclusively through Windows UI Automation (UIA) and programmatic GUI semantics, enabling universal workflow orchestration.
 *   **Symbolic Spatial Mapping**: Hierarchical element tracking via OS-native parent/child relationships and coordinate systems.
