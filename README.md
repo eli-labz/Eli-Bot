@@ -1,3 +1,18 @@
+# Eli-Bot
+
+**The first open-source Computer-Using-Agent that operates any Windows GUI using only natural language, no computer vision, no OCR, no pixel-level imaging.**
+
+[![License: MIT](https://img.shields.io/github/license/eli-labz/Eli-Bot)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/eli-labz/Eli-Bot?style=social)](https://github.com/eli-labz/Eli-Bot/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/eli-labz/Eli-Bot?style=social)](https://github.com/eli-labz/Eli-Bot/network/members)
+[![Python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
+
+⭐ **If Eli-Bot interests you, please consider starring the repo, it helps others discover the project and supports continued development. Forks and contributions are very welcome too!**
+
+**Contents:** Overview | Key Features | Demo | Installation | Usage | Roadmap | Contributing | License
+
+---
+
 Eli Bot is the first open-source Artificial Narrow Intelligence to elicit spatial reasoning and perception as a generalist agentic framework Computer-Using-Agent that fully operates graphical-user-interfaces (GUIs) for Windows 10/11 **through direct OS-native semantic interaction**. It functions as a Computer-Using-Agent / Large-Action-Model, forming the foundation for a pure **symbolic spatial cognition framework** that enables artificial operation of a computer using only natural language, **without relying on computer vision, OCR, or pixel-level imaging**. Eli Bot emulates, plans, and simulates synthetic Human-Interface-Device (HID) interactions through **native Windows Accessibility APIs**, eliciting human-like abstraction across geometric, hierarchical, and temporal dimensions at an Operating-System level. This OS-integrated approach simulating spatial utilization of a computer provides a future-proof, generalized, modular, and dynamic ANI orchestration framework for multi-agent-driven automation, marking an important step in symbolic reasoning towards AGI.
 
 https://github.com/user-attachments/assets/70192d12-535b-4930-9827-59f9086d4d13
