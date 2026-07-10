@@ -11,6 +11,7 @@ https://github.com/user-attachments/assets/70192d12-535b-4930-9827-59f9086d4d13
 *   **AI-Powered Script Generation**: Translates natural language or demonstrations into any kind of code inside any IDE or text edit areas.
 *   **Self-Healing Workflows**: Auto-adjusts to UI changes (e.g., element ID shifts). Reducing maintenance overhead, making Eli Bot's algorithm future-proof.
 *   **AI/ML Integration**: Using NLP to generate scripts (e.g., “Automate Application” → plan of test execution steps in JSON) with self-correcting selectors.
+*   **Neurolib-Enhanced Cognitive State**: Integrates the local `neurolib` source for brain-state inspired modeling used by Eli Bot's adaptive cognitive layer.
 *   **Cross-Context Automation**: Seamlessly combining GUI, web, and API workflows in a Pythonic way, unifying disjointed automation methods (GUI, API, web) into a single framework.
 *   **Accessibility**: Enhancing accessibility for users with different needs, enabling voice or simple text commands to control complex actions. 
 *   **Generalization**: Elicits spatial cognition to understand and execute a wide range of commands in a natural, intuitive manner.
@@ -297,6 +298,21 @@ python ./assistant.py
 
 # Usage
 Run "Assistant.py", say "Ok computer" to enable the assistant by voice commands or click to it or enable the chat to do a fast action. Use Right click above the Assistant to see the available options for the assistant.
+
+## Neurolib integration
+
+Setup (install local Neurolib source in editable mode):
+
+```powershell
+cd E:\ELI-Files\Eli-Bot-main
+\.venv312\Scripts\python.exe -m pip install -e .\core\model\MiniCPM5-1B\neurolib-master
+```
+
+Validation (confirm import path is from local workspace copy):
+
+```powershell
+\.venv312\Scripts\python.exe -c "import neurolib; print(neurolib.__file__)"
+```
 
 ## Brain status and mistake analytics
 
