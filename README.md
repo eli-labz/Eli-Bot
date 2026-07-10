@@ -278,6 +278,24 @@ The act() function is a streamlined method for executing actions, enhancing the 
 9. Assisting in learning and exploration by providing AI-driven guidance and execution of tasks.
 
 
+# Roadmap
+1. Brain-state evolution and observability
+   - Expand cognitive telemetry with stronger trend analytics, event rollups, and richer slash-command diagnostics.
+   - Add deeper per-domain adaptation policies for chat, task execution, and finance workflows.
+2. Consequence-aware autonomy
+   - Extend consequence detection heuristics beyond navigation drift to include form/input side effects and multi-step propagation.
+   - Improve automatic recovery strategies with confidence-aware retries and bounded rollback policies.
+3. Reliability and safety hardening
+   - Add stricter policy gates for high-risk actions and domain-sensitive safeguards.
+   - Increase integration test coverage for recovery, risk escalation, and long-horizon edge tasks.
+4. Workflow expansion
+   - Continue scaling Word and Edge action packs with reusable task templates and verification primitives.
+   - Improve cross-app handoff quality across desktop and browser contexts.
+5. Performance and developer ergonomics
+   - Optimize execution loop latency and state persistence overhead.
+   - Expand documentation and setup guides for reproducible local development.
+
+
 # Conclusion
 This Artificially Assisted User Interface Testing framework is a pioneering tool in the realm of desktop automation. Its ability to understand and execute a wide range of commands in a natural, intuitive manner makes it an invaluable asset for anyone looking to enhance their productivity and interaction with their Windows environment. It's not just a tool; it's a step towards a future where AI seamlessly integrates into our daily computing tasks, making technology more accessible and user-friendly.
 
