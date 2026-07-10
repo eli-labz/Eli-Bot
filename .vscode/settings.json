@@ -1,0 +1,15 @@
+{
+  "files.exclude": {
+    "**/core/third_party/T3MP3ST-main/node_modules": true
+  },
+  "search.exclude": {
+    "**/core/third_party/T3MP3ST-main/node_modules/**": true
+  },
+  "files.watcherExclude": {
+    "**/core/third_party/T3MP3ST-main/node_modules/**": true
+  },
+  "files.associations": {
+    "**/core/third_party/T3MP3ST-main/docs/index.html": "plaintext",
+    "**/core/third_party/T3MP3ST-main/node_modules/**": "plaintext"
+  }
+}

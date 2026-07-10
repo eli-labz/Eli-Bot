@@ -1,7 +1,6 @@
 import subprocess
 import os
 import ctypes
-import sys
 import time
 import winreg
 import shutil
@@ -9,11 +8,9 @@ import re
 from urllib.parse import quote, urlsplit, urlunsplit
 from fuzzywuzzy import fuzz
 import pygetwindow as gw
-import uiautomation as auto
 import win32gui
 import win32process
 import psutil
-import winreg
 
 # Define necessary functions from the user32 DLL
 user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -237,7 +234,7 @@ def get_installed_apps_registry():
 
 
 def get_open_windows():
-    excluded_titles = ["AI Drone Assistant", "NVIDIA GeForce Overlay", "Windows Input Experience", "Program Manager"]
+    excluded_titles = ["AI Agent", "NVIDIA GeForce Overlay", "Windows Input Experience", "Program Manager"]
     excluded_executables = ["NVIDIA Share.exe", "TextInputHost.exe", "Tk.exe", "conhost.exe", "explorer.exe",
                             "CTkToplevel", 'Windows Input Experience', "SecurityHealthSystray.exe", "Steam.exe",
                             "SearchApp.exe", "ApplicationFrameHost.exe", "ShellExperienceHost.exe", "MicrosoftEdge.exe",
@@ -348,7 +345,7 @@ def search_registry_for_application(app_name):
                                     pass
 
                                 # If not found, fall back to 'UninstallString' as a last resort
-                                uninstall_string = winreg.QueryValueEx(skey, 'UninstallString')[0]
+                                _ = winreg.QueryValueEx(skey, 'UninstallString')[0]
                                 # Here you would need to intelligently extract the executable path
                                 # This might involve more complex logic and is not guaranteed to work
                                 # for all applications as uninstall strings can vary significantly.

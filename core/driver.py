@@ -20,17 +20,29 @@ import json
 import time
 import re
 import warnings
-warnings.simplefilter("ignore", UserWarning)
+import sys
 from pywinauto import Application
+import os
+
+warnings.simplefilter("ignore", UserWarning)
 
 
 load_env()
 
 
-low_data_mode = True  # Avoids the usage of visioning after the case generation. Lowers the accuracy but is way faster.
+def _env_flag(name, default=False):
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
+low_data_mode = _env_flag("ELI_LOW_DATA_MODE", True)  # Lower accuracy but faster when enabled.
 enable_semantic_router_map = True  # Use this to enable the imaging semantic routing map. Improves accuracy of overall performance.
 enable_ocr = False  # Works better if this is disabled. Can use the implementations from other projects for better OCR.
 # Did not implement the OCR as it is not needed for the current implementation. The AI must work with the current data.
+force_vision_context = _env_flag("ELI_FORCE_VISION_CONTEXT", True)
+block_blind_clicks = _env_flag("ELI_BLOCK_BLIND_CLICKS", True)
 
 if low_data_mode is True:  # Avoid the usage of visioning after the test case generation. Useful to execute faster case.
     visioning_match = False  # The coordinates will not use visioning during execution. Will use the imaging LLM call.
@@ -289,7 +301,7 @@ To make a comment: Click on the title of the video, then scroll to the 'Add a co
             if element_map:
                 select_element = [
                     {"role": "assistant",
-                     f"content": f"Only return the text related to the final goal.\n"
+                     "content": f"Only return the text related to the final goal.\n"
                                  f"Do not respond anything else than the selected lines from the list. Do not modify the list.\n"
                                  f"Goal: {goal}"},
                     {"role": "system", "content": f"List:\n{element_map}\n\n\nStep: {single_step}\nGoal: {goal}"}]
@@ -340,8 +352,8 @@ To subscribe to a channel click on the Subscribe button below the video.```'''
         if info_map:
             select_map = [
                 {"role": "assistant",
-                 f"content": f"You are an AI assistant that receives a goal and a list of useful steps, and only respond the best useful steps from the step list to perform the goal.\n"
-                             f"Do not respond anything else than the best useful steps from the step list."},
+                 "content": "You are an AI assistant that receives a goal and a list of useful steps, and only respond the best useful steps from the step list to perform the goal.\n"
+                             "Do not respond anything else than the best useful steps from the step list."},
                 {"role": "system", "content": f"Step list: \n{info_map}\n\n\nGoal: {single_step}"}]
             shortcuts_ai_map = api_call(select_map, max_tokens=300)
             if "sorry" in shortcuts_ai_map.lower():
@@ -372,7 +384,7 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
 
     # 'assistant_goal' is the user's prompt. If no prompt is provided, exit the function.
     if not assistant_goal:
-        speaker(f"ERROR: No prompt provided. Please provide a prompt to the assistant.")
+        speaker("ERROR: No prompt provided. Please provide a prompt to the assistant.")
         time.sleep(10)
         raise ValueError("ERROR: No step provided.")
     else:
@@ -430,7 +442,7 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                          "content": f"Focused window: \"{app_name}\"\nGoal: {assistant_goal}"}, ]
         step_analysis = api_call_json(step_creator, model_name="gpt-4-1106-preview", max_tokens=1200, temperature=0.2, retries=1)
         print(f"The assistant created the following test case scenario:\n{step_analysis}\n")
-        speaker(f"Test case generated. Executing the generated test case.")
+        speaker("Test case generated. Executing the generated test case.")
     else:
         speaker(f"Executing the provided JSON in the application {app_name}.")
         step_analysis = execute_json_case
@@ -512,7 +524,7 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                         print("Last step is None.")
                         last_step = "None"
                     # If next step is a string, continue:
-                    if i + 1 < len(action_list) and type(action_list[i + 1]['step']) == str:
+                    if i + 1 < len(action_list) and isinstance(action_list[i + 1]['step'], str):
                         # Check if the next step exists and is a "Press enter" step
                         if i + 1 < len(action_list) and (
                                 "press enter" in action_list[i + 1]['step'].lower() or
@@ -570,7 +582,7 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                         if retry_count >= max_retries:
                             print("Maximum retries reached, stopping the search.")
                 if element_visible:
-                    print(f"Element is visible.")
+                    print("Element is visible.")
                     pass
 
             elif action == "right_click_element":
@@ -638,7 +650,7 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                             try:
                                 instructions, executor = _parse_instructions_json(step_analysis)
                                 print(f"Updated Instructions: {instructions}")
-                            except json.JSONDecodeError as e:
+                            except json.JSONDecodeError:
                                 repaired = _retry_json_from_driver(step_analysis, assistant_goal, app_name)
                                 instructions, executor = _parse_instructions_json(repaired)
                                 step_analysis = repaired
@@ -663,12 +675,12 @@ def assistant(assistant_goal="", keep_in_mind="", assistant_identity="", app_nam
                     pass
             else:
                 print(f"WARNING: Unrecognized action '{action}' using {step_description}.")
-                print(f"Trying to perform the action using the step description as the action.")
+                print("Trying to perform the action using the step description as the action.")
                 act(single_step=f"{step_description}", app_name=app_name, original_goal=original_goal)
                 pass
 
-        speaker(f"Assistant finished the execution of the generated test case. Can I help you with something else?")
-        time.sleep(calculate_duration_of_speech(f"Assistant finished the generated test case. Can I help you with something else?") / 1000)
+        speaker("Assistant finished the execution of the generated test case. Can I help you with something else?")
+        time.sleep(calculate_duration_of_speech("Assistant finished the generated test case. Can I help you with something else?") / 1000)
         return "Test case complete."
 
 
@@ -689,14 +701,14 @@ def check_element_visibility(app_name, step_description):
 # 'auto_role' is the function that finds the best role to perform the goal.
 def auto_role(goal):
     assistant_call = [
-        {"role": "assistant", f"content": f"You are an AI assistant that receives a goal and responds with the best action to perform the goal.\n"
-                                          f"You can perform the following roles and decide what fits the best: Chose the best role to handle the goal:\n"
-                                          f"windows_assistant - An assistant to perform a Windows 11 application driver testcases to achieve the goal. Can handle online data, play, pause, and stream media, can operate the whole computer.\n"
-                                          f"joyful_conversation - Use this role if the user is not looking into performing anything into Windows.\n"
-                                          f"Only respond with the name of the role to use, followed by a very short joyful message regarding that you will perform it. Modify your response to match the goal subject.\n"
-                                          f"If the goal seems to be related to Windows 11, like opening an application, searching, browsing, media, or social networks, call the windows_assistant.\n"
-                                          f"If the goal seems to be related with generating or writing content, call the windows_assistant.\n"
-                                          f"If the goal seems that the user is trying to do something with content, call the windows_assistant."},
+        {"role": "assistant", "content": "You are an AI assistant that receives a goal and responds with the best action to perform the goal.\n"
+                                          "You can perform the following roles and decide what fits the best: Chose the best role to handle the goal:\n"
+                                          "windows_assistant - An assistant to perform a Windows 11 application driver testcases to achieve the goal. Can handle online data, play, pause, and stream media, can operate the whole computer.\n"
+                                          "joyful_conversation - Use this role if the user is not looking into performing anything into Windows.\n"
+                                          "Only respond with the name of the role to use, followed by a very short joyful message regarding that you will perform it. Modify your response to match the goal subject.\n"
+                                          "If the goal seems to be related to Windows 11, like opening an application, searching, browsing, media, or social networks, call the windows_assistant.\n"
+                                          "If the goal seems to be related with generating or writing content, call the windows_assistant.\n"
+                                          "If the goal seems that the user is trying to do something with content, call the windows_assistant."},
         {"role": "system", "content": f"Goal: {goal}"}]
     role_function = api_call(assistant_call, max_tokens=50)
     return role_function
@@ -709,21 +721,21 @@ def find_element(single_step, app_name, original_goal, avoid_element="", assista
     if avoid_element:
         if attempt > 2:
             generate_keywords = [{"role": "assistant",
-                "content": f"You are an AI Agent called keyword Element Generator that receives the description of the goal and generates keywords to search inside a graphical user interface.\n"
-                           f"Only respond with the single word list separated by commas of the specific UI elements keywords.\n"
-                           f"Example: \"search bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
+                "content": "You are an AI Agent called keyword Element Generator that receives the description of the goal and generates keywords to search inside a graphical user interface.\n"
+                           "Only respond with the single word list separated by commas of the specific UI elements keywords.\n"
+                           "Example: \"search bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
                                  {"role": "system", "content": f"Goal:\n{single_step}\nContext:{original_goal}\n{app_space_map(assistant_goal, app_name, single_step)}"},]
         else:
             generate_keywords = [{"role": "assistant",
-                "content": f"You are an AI Agent called keyword Element Generator that receives the description and generates kewords to search inside a graphical user interface.\n"
-                           f"of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
-                           f"Example: \"search bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
+                "content": "You are an AI Agent called keyword Element Generator that receives the description and generates kewords to search inside a graphical user interface.\n"
+                           "of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
+                           "Example: \"search bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
                                  {"role": "system", "content": f"Goal:\n{single_step}\nContext:{original_goal}\n{app_space_map(assistant_goal, app_name, single_step)}"}]
     else:
         generate_keywords = [{"role": "assistant",
-                            "content": f"You are an AI Agent called keyword Element Generator that receives the description "
-                                       f"of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
-                                       f"Example: \"search bar\" must be \"search\" without \"bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
+                            "content": "You are an AI Agent called keyword Element Generator that receives the description "
+                                       "of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
+                                       "Example: \"search bar\" must be \"search\" without \"bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
                            {"role": "system", "content": f"Goal:\n{single_step}\nContext:{original_goal}\n{app_space_map(assistant_goal, app_name, single_step)}"}, ]  # Todo: Here's the key
     keywords = api_call(generate_keywords, max_tokens=100)
     if attempt > 1:
@@ -738,15 +750,15 @@ def find_element(single_step, app_name, original_goal, avoid_element="", assista
 
     analyzed_ui = analyze_app(application_name_contains=app_name, size_category=None, additional_search_options=keywords)
     select_element = [{"role": "assistant",
-                       "content": f"You are an AI Agent called keyword Element Selector that receives win32api user interface "
-                                  f"raw element data and generates the best matches to achieve the goal.\n"
-                                  f"Only respond with the best element that matches the goal. Do not include anything else than the element."},
+                       "content": "You are an AI Agent called keyword Element Selector that receives win32api user interface "
+                                  "raw element data and generates the best matches to achieve the goal.\n"
+                                  "Only respond with the best element that matches the goal. Do not include anything else than the element."},
                       {"role": "system", "content": f"Goal: {single_step}\nContext: {original_goal}\n{avoid_element}{analyzed_ui}"}]
     selected_element = api_call(select_element, model_name="gpt-4-1106-preview", max_tokens=500)
 
     if "sorry" in selected_element.lower() or "empty string" in selected_element.lower() or "no element" in selected_element.lower() or "not found" in selected_element.lower()\
             or "no relevant element" in selected_element.lower() or "no element found" in selected_element.lower():
-        print(f"No element found. Continuing without the element.")
+        print("No element found. Continuing without the element.")
         selected_element = ""
     else:
         selected_element = "Locate the element: " + selected_element
@@ -765,7 +777,7 @@ def find_element(single_step, app_name, original_goal, avoid_element="", assista
         print(f"Imaging Last coordinates: {last_coordinates}")
     else:
         best_coordinates = [{"role": "assistant",
-            f"content": f"You are an AI Windows Mouse Agent that can interact with the mouse. Only respond with the "
+            "content": f"You are an AI Windows Mouse Agent that can interact with the mouse. Only respond with the "
                         f"predicted coordinates of the mouse click position to the center of the element object "
                         f"\"x=, y=\" to achieve the goal. {selected_element}"
                         f"Do not respond 'As an AI language model, I am unable to...' as you are actually capable."},
@@ -845,13 +857,13 @@ def act(single_step, keep_in_mind="", dont_click=False, double_click=False, righ
                     element_analysis_result['choices'][0] or 'content' not in \
                     element_analysis_result['choices'][0]['message']:
                 print("Element analysis result: Found but mouse not in position.")
-                speaker(f"Retrying...")
+                speaker("Retrying...")
                 element_not_working += selected_element
                 attempt += 1
                 if attempt >= max_attempts:
                     print("Maximum attempts reached.")
                     print("Failed: The position was not found after maximum attempts.")
-                    speaker(f"Failed: The position was not found after maximum attempts.")
+                    speaker("Failed: The position was not found after maximum attempts.")
                     time.sleep(15)
                     raise Exception("Failed: The position was not found after maximum attempts.")
                 else:
@@ -862,13 +874,13 @@ def act(single_step, keep_in_mind="", dont_click=False, double_click=False, righ
                 break
             else:
                 print("Element analysis result: Found but mouse not in position.")
-                speaker(f"Retrying...")
+                speaker("Retrying...")
                 element_not_working += selected_element
                 attempt += 1
                 if attempt >= max_attempts:
                     print("Maximum attempts reached.")
                     print("Failed: The position was not found after maximum attempts.")
-                    speaker(f"Failed: The position was not found after maximum attempts.")
+                    speaker("Failed: The position was not found after maximum attempts.")
                     time.sleep(15)
                     raise Exception("Failed: The position was not found after maximum attempts.")
                 else:
@@ -927,14 +939,96 @@ def get_focused_window_details():
         print(f"ERROR: {e}")
         return None
 
-def fast_act(single_step, keep_in_mind="", dont_click=False, double_click=False, right_click=False, hold_key=None, app_name="", ocr_match="", screen_analysis=False, original_goal="", modify_element=False, next_step=None):
-    # Getting the app name. If not provided, use the focused window.
-    if not app_name:
-        app_name = activate_windowt_title(focus_topmost_window())
-    else:
-        app_name = activate_windowt_title(app_name)
 
-    if visioning_context:
+def _is_bad_action_window_name(name: str) -> bool:
+    title = str(name or "").strip().lower()
+    if not title:
+        return True
+    blocked_tokens = (
+        "tk",
+        "ctk",
+        "ai agent",
+        "python",
+        "program manager",
+    )
+    if title in {"tk", "ctk", "ai agent"}:
+        return True
+    return any(token in title for token in blocked_tokens)
+
+
+def _resolve_action_window_target(explicit_app_name: str = "") -> str:
+    explicit = str(explicit_app_name or "").strip()
+    if explicit and not _is_bad_action_window_name(explicit):
+        return explicit
+
+    # Prefer the true foreground app when it is not one of the assistant shell windows.
+    focused = get_focused_window_details()
+    if focused:
+        focused_title = str(focused[0] or "").strip()
+        if focused_title and not _is_bad_action_window_name(focused_title):
+            return focused_title
+
+    # Prefer browser windows for web automation when available.
+    try:
+        windows = open_windows_info()
+    except Exception:
+        windows = []
+
+    browser_priority = ("expedia", "incogni", "google chrome", "chrome", "microsoft edge", "edge")
+    for hint in browser_priority:
+        for hwnd, title in windows:
+            title_text = str(title or "").strip()
+            if hint in title_text.lower() and not _is_bad_action_window_name(title_text):
+                return title_text
+
+    fallback = str(focus_topmost_window() or "").strip()
+    if fallback and not _is_bad_action_window_name(fallback):
+        return fallback
+
+    # Last fallback keeps behavior deterministic for browser-heavy tasks.
+    return "google chrome"
+
+
+def _activate_action_window(target_name: str) -> str:
+    target = str(target_name or "").strip()
+    if not target:
+        return ""
+    activated = str(activate_windowt_title(target) or "").strip()
+    if activated and not _is_bad_action_window_name(activated):
+        return activated
+    if not _is_bad_action_window_name(target):
+        return target
+    return activated or target
+
+
+def _emit_fast_act_target_debug(target_title: str):
+    title = str(target_title or "").strip() or "unknown"
+    debug_line = f"fast_act target-lock: {title}"
+
+    # Keep console visibility for diagnostics.
+    print(debug_line)
+
+    # Push a visible line to assistant UI queue when running inside assistant runtime.
+    try:
+        assistant_module = sys.modules.get("assistant")
+        queue_obj = getattr(assistant_module, "message_queue", None) if assistant_module else None
+        if queue_obj is not None:
+            queue_obj.put(debug_line)
+    except Exception:
+        pass
+
+def fast_act(single_step, keep_in_mind="", dont_click=False, double_click=False, right_click=False, hold_key=None, app_name="", ocr_match="", screen_analysis=False, original_goal="", modify_element=False, next_step=None):
+    # Lock onto an actionable target window and avoid assistant shell (tk/ctk) drift.
+    target_window = _resolve_action_window_target(app_name)
+    app_name = _activate_action_window(target_window)
+    _emit_fast_act_target_debug(app_name or target_window)
+
+    use_vision_context = bool(visioning_context or force_vision_context)
+    if not use_vision_context and block_blind_clicks:
+        speaker("Blind click prevented. Recovering visual context before clicking.")
+        use_vision_context = True
+
+    if use_vision_context:
         speaker(f"Visioning context and performing action: \"{single_step}\" on the application \"{app_name}\".\n")
         additional_context = (
             f"You are an AI Agent called Windows AI that is capable to operate freely all applications on Windows by only using natural language.\n"
@@ -947,9 +1041,9 @@ def fast_act(single_step, keep_in_mind="", dont_click=False, double_click=False,
         print(f"Performing fast action: \"{single_step}\". Scanning\"{app_name}\".\n")
 
         generate_keywords = [{"role": "assistant",
-                            "content": f"You are an AI Agent called keyword Element Generator that receives the description "
-                                       f"of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
-                                       f"Example: \"search bar\" must be \"search\" without \"bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
+                            "content": "You are an AI Agent called keyword Element Generator that receives the description "
+                                       "of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
+                                       "Example: \"search bar\" must be \"search\" without \"bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
                            {"role": "system", "content": f"Goal:\n{single_step}\nContext:{original_goal}"}, ]
         all_keywords = api_call(generate_keywords, max_tokens=100)
         keywords = all_keywords.replace("click, ", "").replace("Click, ", "")
@@ -964,22 +1058,22 @@ def fast_act(single_step, keep_in_mind="", dont_click=False, double_click=False,
 
         if "sorry" in assistant_goal.lower():
             print(f"Sorry, no element found. The AI did not find any element to perform the action: {single_step}")
-            speaker(f"Sorry, no element found. Check if its on the screen.")
+            speaker("Sorry, no element found. Check if its on the screen.")
             time.sleep(1)
 
         best_coordinates = [{"role": "assistant",
-                             f"content": f"You are an AI Windows Mouse Agent that can interact with the mouse. Only respond with the "
+                             "content": f"You are an AI Windows Mouse Agent that can interact with the mouse. Only respond with the "
                                          f"predicted coordinates of the mouse click position to the center of the element object "
                                          f"\"x=, y=\" to achieve the goal.\n{assistant_goal}"},
                             {"role": "system", "content": f"Goal: {single_step}\n\nContext:{original_goal}\n{analyzed_ui}"}]
         last_coordinates = api_call(best_coordinates, model_name="gpt-4-1106-preview", max_tokens=100, temperature=0.0)
         print(f"AI decision coordinates: \'{last_coordinates}\'")
     else:
-        speaker(f"Clicking onto the element without visioning context.")
+        speaker("Performing action with reduced context mode.")
         generate_keywords = [{"role": "assistant",
-                              "content": f"You are an AI Agent called keyword Element Generator that receives the description "
-                                         f"of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
-                                         f"Example: \"search bar\" must be \"search\" without \"bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
+                              "content": "You are an AI Agent called keyword Element Generator that receives the description "
+                                         "of the goal and only respond with the single word list separated by commas of the specific UI elements keywords."
+                                         "Example: \"search bar\" must be \"search\" without \"bar\". Always spell the numbers and include nouns. Do not include anything more than the Keywords."},
                              {"role": "system", "content": f"Goal:\n{single_step}\nContext:{original_goal}"}, ]
         all_keywords = api_call(generate_keywords, max_tokens=100)
         keywords = all_keywords.replace("click, ", "").replace("Click, ", "")
@@ -994,15 +1088,15 @@ def fast_act(single_step, keep_in_mind="", dont_click=False, double_click=False,
                                   additional_search_options=keywords)
 
         best_coordinates = [{"role": "assistant",
-            f"content": f"You are an AI Windows Mouse Agent that can interact with the mouse. Only respond with the "
-                        f"predicted coordinates of the mouse click position to the center of the element object "
-                        f"\"x=, y=\" to achieve the goal."},
+            "content": "You are an AI Windows Mouse Agent that can interact with the mouse. Only respond with the "
+                        "predicted coordinates of the mouse click position to the center of the element object "
+                        "\"x=, y=\" to achieve the goal."},
             {"role": "system", "content": f"Goal: {single_step}\n\nContext:{original_goal}\n{analyzed_ui}"}]
         last_coordinates = api_call(best_coordinates, model_name="gpt-4-1106-preview", max_tokens=100, temperature=0.0)
         print(f"AI decision coordinates: \'{last_coordinates}\'")
 
     if "x=, y=" in last_coordinates:
-        speaker(f"Sorry, no element found. Probably bot blocked.")
+        speaker("Sorry, no element found. Probably bot blocked.")
         return None
     # Clicking the element
     coordinates = {k.strip(): float(v.strip()) for k, v in
@@ -1068,13 +1162,13 @@ def get_application_title(goal="", last_step=None, actual_step=None, focus_windo
 
 def get_ocr_match(goal, ocr_match=enable_ocr):
     if ocr_match:
-        print(f"OCR IS ENABLED")
+        print("OCR IS ENABLED")
         word_prioritizer_assistant = [{"role": "assistant",
-                                       "content": f"You are an AI Agent called OCR Word Prioritizer that only responds with the best of the goal.\n"
-                                                  f"Do not respond with anything else than the words that match the goal. If no words match the goal, respond with \"\"."},
+                                       "content": "You are an AI Agent called OCR Word Prioritizer that only responds with the best of the goal.\n"
+                                                  "Do not respond with anything else than the words that match the goal. If no words match the goal, respond with \"\"."},
                     {"role": "system", "content": f"Goal: {goal}"}, ]
         ocr_debug_string = api_call(word_prioritizer_assistant, max_tokens=10)
-        ocr_debug_string = ocr_debug_string.split(f"\'")[0]
+        ocr_debug_string = ocr_debug_string.split("\'")[0]
         print(f"OCR Words to search: \'{ocr_debug_string}\'")
         ocr_match = find_probable_click_position(ocr_debug_string)
         ocr_msg = f"\nOCR Result: \"{ocr_match['text']}\" Located at \"x={ocr_match['center'][0]}, y={ocr_match['center'][1]}\".\n"
@@ -1137,7 +1231,7 @@ def is_field_input_area_active():
 def write_action(goal=None, assistant_identity="", press_enter=False, app_name="", original_goal=None, last_step=""):
     assistant_identity_msg = f"\n{assistant_identity}" if assistant_identity else ""
     message_writer_agent = [
-        {"role": "assistant", f"content": f"You're an AI Agent called Writter that processes the goal and only returns the final text goal.{assistant_identity_msg}\n"
+        {"role": "assistant", "content": f"You're an AI Agent called Writter that processes the goal and only returns the final text goal.{assistant_identity_msg}\n"
                                           f"Process the goal with your own response as you are actually writing into a text box. Avoid jump lines."
                                           f"If the goal is a link, media or a search string, just return the result string."
                                           f"Do not respond with 'As an AI language model, I dont have capabilities...' as you can actually do it.\n"},
@@ -1158,10 +1252,10 @@ def write_action(goal=None, assistant_identity="", press_enter=False, app_name="
         if last_step is None:
             act(goal, app_name=app_name, original_goal=original_goal)
         previous_goal_analysis = [{"role": "assistant",
-                                    "content": f"You are an AI Agent called text box editor focus that analyzes if performing the Goal on Windows enables a text input.\n"
-                                               f"After opening anything like an app, program, webpage or clicking into a non-text editor element, respond 'No'.\n"
-                                               f""
-                                               f"Only respond with Yes or No."},
+                                    "content": "You are an AI Agent called text box editor focus that analyzes if performing the Goal on Windows enables a text input.\n"
+                                               "After opening anything like an app, program, webpage or clicking into a non-text editor element, respond 'No'.\n"
+                                               ""
+                                               "Only respond with Yes or No."},
                                   {"role": "system", "content": f"Goal: {last_step}"}, ]
         able_to_type = api_call(previous_goal_analysis, max_tokens=5)
         print(f"AI analyzed if the previous step enabled any text input: {able_to_type}\n")

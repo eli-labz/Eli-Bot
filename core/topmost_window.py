@@ -2,7 +2,6 @@ import win32com.client
 import win32gui
 import win32con
 import win32process
-from datetime import datetime
 
 def enumerate_windows():
     windows = []

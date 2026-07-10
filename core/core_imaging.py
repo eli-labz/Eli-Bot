@@ -7,7 +7,6 @@ from PIL import Image
 from core_api import api_call
 
 # Assuming that the `activate_window_title` function is defined in another module correctly
-from window_focus import activate_windowt_title
 
 # OpenAI API Key
 api_key = 'insert_your_api_key_here'
@@ -111,7 +110,7 @@ def imaging(window_title=None, additional_context=None, x=None, y=None, screensh
         window = focus_window(window_title)
         if not window:
             return None  # If no window is found, exit the function.
-        if screenshot_size and type(screenshot_size) == tuple and x is not None and y is not None:
+        if screenshot_size and isinstance(screenshot_size, tuple) and x is not None and y is not None:
             offset_x, offset_y = screenshot_size[0] // 2, screenshot_size[1] // 2
             # Adjust region to be relative to the window's top-left corner.
             window_box = window.box

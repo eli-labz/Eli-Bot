@@ -6,13 +6,22 @@ from typing import Dict, Optional
 from .action_executor import ActionExecutor
 from .autoresearch_adapter import AutoResearchAdapter
 from .browser_session import BrowserSession
+from .consequence import ConsequenceAnalyzer
 from .config import EdgeActionsConfig
 from .memory_trace import MemoryTrace
-from .models import ActionTokenType, ExecutionResult
+from .models import ActionToken, ActionTokenType, ExecutionResult
 from .planner import Planner
 from .risk_policy import RiskPolicy
 from .task_catalog import get_task
 from .verifier import Verifier
+
+try:
+    from core.human_brain import HumanBrain
+except Exception:
+    try:
+        from human_brain import HumanBrain
+    except Exception:
+        HumanBrain = None
 
 
 class EdgeActionRunner:
@@ -21,19 +30,53 @@ class EdgeActionRunner:
         self.policy = RiskPolicy()
         self.planner = Planner()
         self.verifier = Verifier()
+        self.consequence = ConsequenceAnalyzer()
         self.research = AutoResearchAdapter()
+        self.brain = HumanBrain() if HumanBrain is not None else None
+
+    def _resolve_brain_domain(self, task_domain: str) -> str:
+        normalized = str(task_domain or "").strip().lower()
+        finance_hints = {
+            "finance",
+            "bank",
+            "banking",
+            "payroll",
+            "tax",
+            "invoice",
+            "billing",
+            "treasury",
+            "payment",
+            "money",
+            "accounting",
+        }
+        return "finance" if any(h in normalized for h in finance_hints) else "tasks"
 
     def run_task(self, task_id: str, inputs: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         if not self.config.enabled:
             raise RuntimeError("Edge Actions are disabled. Set ELI_EDGE_ACTIONS_ENABLED=true")
 
         task = get_task(task_id)
+        brain_domain = self._resolve_brain_domain(task.domain)
         inputs = inputs or {}
         trace = MemoryTrace(self.config.trace_dir)
         session = BrowserSession(self.config)
 
         trace.add_event({"type": "task_start", "task": task_id, "inputs": inputs})
         trace.add_event({"type": "task_spec", "payload": asdict(task)})
+
+        brain_snapshot = None
+        if self.brain is not None:
+            objective = str(inputs.get("objective", ""))
+            guidance = self.brain.execution_guidance(task.name, objective, page_title="", domain=brain_domain)
+            brain_snapshot = self.brain.state_snapshot(domain=brain_domain)
+            trace.add_event(
+                {
+                    "type": "brain_guidance",
+                    "domain": brain_domain,
+                    "guidance": guidance,
+                    "brain": brain_snapshot,
+                }
+            )
 
         # Research context is optional but always traceable.
         if inputs.get("query"):
@@ -49,8 +92,14 @@ class EdgeActionRunner:
                 before = session.observe()
                 trace.add_observation("before", before)
 
-                action = self.planner.next_action(task, before)
-                risk = self.policy.evaluate(task, action)
+                if self.brain is not None:
+                    objective = str(inputs.get("objective", ""))
+                    _ = self.brain.execution_guidance(task.name, objective, before.title, domain=brain_domain)
+                    brain_snapshot = self.brain.state_snapshot(domain=brain_domain)
+                    trace.add_event({"type": "brain_state", "step": step, "domain": brain_domain, "brain": brain_snapshot})
+
+                action = self.planner.next_action(task, before, brain_snapshot=brain_snapshot)
+                risk = self.policy.evaluate(task, action, brain_snapshot=brain_snapshot)
                 if risk.requires_approval:
                     approval_action = self.policy.approval_token(risk.reason)
                     trace.add_event({
@@ -95,6 +144,15 @@ class EdgeActionRunner:
                 trace.add_observation("after", after)
 
                 verification = self.verifier.verify(task, action, before, after, execute_status)
+                consequence = self.consequence.assess(
+                    task=task,
+                    action=action,
+                    before=before,
+                    after=after,
+                    execute_status=execute_status,
+                    verification_status=verification,
+                    error=error,
+                )
                 result = ExecutionResult(
                     action_id=f"{task.id}-{step}",
                     action_type=action.action_type.value,
@@ -107,12 +165,73 @@ class EdgeActionRunner:
                     recovery_attempted=recovery_attempted,
                 )
                 trace.add_result(result)
+                trace.add_event(
+                    {
+                        "type": "consequence_assessment",
+                        "step": step,
+                        "action": action.action_type.value,
+                        "severity": consequence.severity,
+                        "unintended": consequence.unintended,
+                        "summary": consequence.summary,
+                        "recommended_recovery": consequence.recommended_recovery,
+                    }
+                )
+
+                if consequence.unintended and consequence.recommended_recovery == "revert_to_before_url" and before.url:
+                    correction = ActionToken(
+                        action_type=ActionTokenType.NAVIGATE,
+                        value=before.url,
+                        metadata={"auto_correction": "revert_to_before_url", "trigger_step": step},
+                    )
+                    try:
+                        executor.execute(correction)
+                        correction_after = session.observe()
+                        trace.add_event(
+                            {
+                                "type": "consequence_correction",
+                                "step": step,
+                                "status": "ok",
+                                "from": after.url,
+                                "to": correction_after.url,
+                            }
+                        )
+                    except Exception as correction_error:
+                        trace.add_event(
+                            {
+                                "type": "consequence_correction",
+                                "step": step,
+                                "status": "error",
+                                "error": str(correction_error),
+                            }
+                        )
+
+                if consequence.unintended and consequence.severity in {"medium", "high"} and self.brain is not None:
+                    _ = self.brain.apply_feedback("verification_failed", confidence=0.7, domain=brain_domain)
 
                 if verification == "fail":
                     status = "verification_failed"
                     break
         finally:
             session.stop()
+
+        if self.brain is not None:
+            confidence_by_status = {
+                "completed": 0.85,
+                "paused_for_approval": 0.55,
+                "blocked": 0.65,
+                "verification_failed": 0.75,
+            }
+            confidence = float(confidence_by_status.get(status, 0.6))
+            adapted = self.brain.apply_feedback(status, confidence=confidence, domain=brain_domain)
+            trace.add_event(
+                {
+                    "type": "brain_feedback",
+                    "domain": brain_domain,
+                    "status": status,
+                    "confidence": confidence,
+                    "brain": adapted,
+                }
+            )
 
         trace_path = trace.finalize(task, status)
         return {"status": status, "trace_path": str(trace_path), "task_id": task.id}

@@ -37,6 +37,7 @@ DEFAULT_APPROVAL_REQUIRED_ACTIONS = [
 
 
 _TASK_ROWS = [
+    ("microsoft_word_supervised_actions", "Microsoft Word Supervised Actions", "microsoft word"),
     ("company_research", "Company Research", "company research"),
     ("crm_updates", "CRM Updates", "crm"),
     ("outlook_web_email_triage", "Outlook Web Email Triage", "email"),

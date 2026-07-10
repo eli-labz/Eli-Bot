@@ -84,3 +84,12 @@ class RiskDecision:
     allowed: bool
     requires_approval: bool
     reason: str = ""
+
+
+@dataclass
+class ConsequenceAssessment:
+    understood: bool
+    severity: str
+    summary: str
+    unintended: bool = False
+    recommended_recovery: str = "none"

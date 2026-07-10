@@ -69,8 +69,8 @@ def calculate_duration_of_speech(text, lang='en', wpm=150):
 
 
 def play_audio(file_path, text, lang='en'):
-    # Estimate the duration the subtitles should be shown
-    duration = calculate_duration_of_speech(text, lang)
+    # Keep this call for side-effect compatibility with existing speech timing logic.
+    calculate_duration_of_speech(text, lang)
 
     if not _ensure_audio_ready():
         if os.path.exists(file_path):

@@ -1,8 +1,14 @@
 import customtkinter as Ctk
-from PIL import Image, ImageTk
+from PIL import Image
 import time
 import random
 import os
+import json
+from collections import Counter
+import subprocess
+import shutil
+import shlex
+import pyautogui
 from queue import Queue
 import speech_recognition as sr
 import threading
@@ -10,13 +16,297 @@ import re
 from datetime import datetime
 from urllib.parse import urlencode, quote_plus
 from env_loader import load_env
+from assistant_intents import get_word_workflow_steps
 from voice import speaker, set_volume, set_subtitles
-from driver import assistant, act, fast_act, auto_role, perform_simulated_keypress, write_action
+from driver import assistant, fast_act, auto_role, perform_simulated_keypress, write_action
+from tempest_bridge import dispatch_tempest_prompt
 from window_focus import activate_windowt_title
 from window_focus import heal_and_open_url_in_edge
+from window_focus import find_window_by_title, bring_to_foreground
+from window_focus import open_windows_info
+from core_api import api_call
+from human_brain import HumanBrain
 
 
 load_env()
+
+# Persistent conversational memory (survives app restarts).
+CONVERSATION_MAX_STORED_MESSAGES = 120
+CONVERSATION_CONTEXT_MESSAGES = 16
+CONVERSATION_MEMORY_PATH = os.path.join(
+    os.environ.get("ELI_CONVERSATION_DIR", os.path.join(os.path.expanduser("~"), ".eli_bot")),
+    "conversation_history.json",
+)
+chat_history = []
+chat_history_lock = threading.Lock()
+
+
+def _load_chat_history():
+    if not os.path.exists(CONVERSATION_MEMORY_PATH):
+        return []
+    try:
+        with open(CONVERSATION_MEMORY_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            messages = payload.get("messages", [])
+        else:
+            messages = payload
+        if not isinstance(messages, list):
+            return []
+        sanitized = []
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if role in {"user", "assistant"} and content:
+                sanitized.append({"role": role, "content": content})
+        return sanitized[-CONVERSATION_MAX_STORED_MESSAGES:]
+    except Exception as e:
+        print(f"Failed to load conversation memory: {e}")
+        return []
+
+
+def _save_chat_history(history):
+    try:
+        os.makedirs(os.path.dirname(CONVERSATION_MEMORY_PATH), exist_ok=True)
+        with open(CONVERSATION_MEMORY_PATH, "w", encoding="utf-8") as f:
+            json.dump({"messages": history[-CONVERSATION_MAX_STORED_MESSAGES:]}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Failed to save conversation memory: {e}")
+
+
+def _clear_chat_history():
+    global chat_history
+    with chat_history_lock:
+        chat_history = []
+    try:
+        if os.path.exists(CONVERSATION_MEMORY_PATH):
+            os.remove(CONVERSATION_MEMORY_PATH)
+    except Exception as e:
+        print(f"Failed to clear conversation memory: {e}")
+
+
+chat_history = _load_chat_history()
+TEMPEST_STRICT_ENV = "ELI_TEMPEST_STRICT_MODE"
+HUMAN_BRAIN = HumanBrain()
+
+
+def _reload_human_brain() -> None:
+    global HUMAN_BRAIN
+    HUMAN_BRAIN = HumanBrain()
+
+
+def _format_brain_status_summary() -> str:
+    snapshot = HUMAN_BRAIN.all_domain_snapshots()
+    domains = snapshot.get("domains", {})
+    parts = []
+    for domain_name in ("chat", "tasks", "finance"):
+        domain = domains.get(domain_name, {})
+        if not isinstance(domain, dict):
+            continue
+        level = domain.get("consciousness_level", {}) if isinstance(domain.get("consciousness_level"), dict) else {}
+        level_id = int(level.get("level", -1))
+        level_name = str(level.get("name", "Unknown"))
+        parts.append(
+            f"{domain_name}: val={domain.get('valence', 0.0):.2f}, "
+            f"aro={domain.get('arousal', 0.0):.2f}, "
+            f"focus={domain.get('focus', 0.0):.2f}, "
+            f"updates={int(domain.get('updates', 0))}, "
+            f"L{level_id}:{level_name}"
+        )
+
+    return (
+        f"Brain status | profile={snapshot.get('profile')} | "
+        f"decay={'on' if snapshot.get('decay_enabled') else 'off'} "
+        f"(half_life={snapshot.get('decay_half_life_seconds')}) | "
+        + " ; ".join(parts)
+    )
+
+
+def _summarize_brain_mistakes(limit: int = 10) -> str:
+    safe_limit = max(1, min(100, int(limit or 10)))
+    trace_dir = os.path.abspath(os.environ.get("ELI_EDGE_ACTIONS_TRACE_DIR", "edge_action_traces"))
+    if not os.path.isdir(trace_dir):
+        return f"No trace directory found at {trace_dir}. Run an edge task first."
+
+    try:
+        files = [
+            os.path.join(trace_dir, name)
+            for name in os.listdir(trace_dir)
+            if name.lower().endswith(".json")
+        ]
+    except Exception as e:
+        return f"Unable to read trace directory: {e}"
+
+    if not files:
+        return f"No trace files found in {trace_dir}."
+
+    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+    mistakes = []
+    pattern_counter = Counter()
+
+    for path in files:
+        try:
+            payload = json.loads(open(path, "r", encoding="utf-8").read())
+        except Exception:
+            continue
+
+        events = payload.get("events", []) if isinstance(payload, dict) else []
+        task_id = str(payload.get("task_id", "unknown")) if isinstance(payload, dict) else "unknown"
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "consequence_assessment":
+                continue
+            if not bool(event.get("unintended", False)):
+                continue
+
+            severity = str(event.get("severity", "unknown"))
+            summary = str(event.get("summary", "unknown consequence"))
+            step = int(event.get("step", -1))
+            stamp = str(event.get("timestamp", ""))
+            recommendation = str(event.get("recommended_recovery", "none"))
+
+            mistakes.append(
+                {
+                    "task": task_id,
+                    "step": step,
+                    "severity": severity,
+                    "summary": summary,
+                    "timestamp": stamp,
+                    "recommended_recovery": recommendation,
+                }
+            )
+            pattern_counter[summary] += 1
+
+    if not mistakes:
+        return "No unintended consequence events found in current traces."
+
+    # Most recent first by timestamp string (ISO) then insertion order fallback.
+    mistakes.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+    recent = mistakes[:safe_limit]
+
+    recent_text = " | ".join(
+        f"{m.get('task')}#s{m.get('step')}:{m.get('severity')}:{m.get('summary')}"
+        for m in recent
+    )
+
+    severity_counts = Counter()
+    for item in recent:
+        level = str(item.get("severity", "other")).strip().lower()
+        if level not in {"high", "medium", "low"}:
+            level = "other"
+        severity_counts[level] += 1
+
+    severity_text = (
+        f"high={severity_counts.get('high', 0)}, "
+        f"medium={severity_counts.get('medium', 0)}, "
+        f"low={severity_counts.get('low', 0)}, "
+        f"other={severity_counts.get('other', 0)}"
+    )
+
+    top_patterns = pattern_counter.most_common(3)
+    pattern_text = " | ".join(f"{summary} x{count}" for summary, count in top_patterns)
+
+    return (
+        f"Brain mistakes summary (last {len(recent)} unintended events). "
+        f"Severity buckets: {severity_text}. "
+        f"Recent: {recent_text}. "
+        f"Top patterns: {pattern_text}."
+    )
+
+
+def _apply_brain_preset_env(preset: str) -> bool:
+    normalized = str(preset or "").strip().lower()
+    if normalized not in {"cautious", "balanced", "aggressive"}:
+        return False
+
+    if normalized == "cautious":
+        updates = {
+            "ELI_HUMAN_BRAIN_PROFILE": "cautious",
+            "ELI_HUMAN_BRAIN_DECAY_HALF_LIFE_SECONDS": "1200",
+            "ELI_BRAIN_PLANNER_MAX_COGNITIVE_GUARDS": "4",
+            "ELI_BRAIN_PLANNER_HIGH_AROUSAL_THRESHOLD": "0.5",
+            "ELI_BRAIN_RISK_HIGH_AROUSAL_THRESHOLD": "0.55",
+            "ELI_BRAIN_RISK_LOW_FOCUS_THRESHOLD": "0.45",
+        }
+    elif normalized == "aggressive":
+        updates = {
+            "ELI_HUMAN_BRAIN_PROFILE": "aggressive",
+            "ELI_HUMAN_BRAIN_DECAY_HALF_LIFE_SECONDS": "600",
+            "ELI_BRAIN_PLANNER_MAX_COGNITIVE_GUARDS": "1",
+            "ELI_BRAIN_PLANNER_HIGH_AROUSAL_THRESHOLD": "0.85",
+            "ELI_BRAIN_RISK_HIGH_AROUSAL_THRESHOLD": "0.9",
+            "ELI_BRAIN_RISK_LOW_FOCUS_THRESHOLD": "0.15",
+        }
+    else:
+        updates = {
+            "ELI_HUMAN_BRAIN_PROFILE": "balanced",
+            "ELI_HUMAN_BRAIN_DECAY_HALF_LIFE_SECONDS": "900",
+            "ELI_BRAIN_PLANNER_MAX_COGNITIVE_GUARDS": "2",
+            "ELI_BRAIN_PLANNER_HIGH_AROUSAL_THRESHOLD": "0.65",
+            "ELI_BRAIN_RISK_HIGH_AROUSAL_THRESHOLD": "0.7",
+            "ELI_BRAIN_RISK_LOW_FOCUS_THRESHOLD": "0.3",
+        }
+
+    for key, value in updates.items():
+        os.environ[key] = value
+
+    _reload_human_brain()
+    return True
+
+
+def _is_tempest_strict_mode_enabled() -> bool:
+    return str(os.environ.get(TEMPEST_STRICT_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _set_tempest_strict_mode(enabled: bool) -> None:
+    os.environ[TEMPEST_STRICT_ENV] = "1" if enabled else "0"
+
+
+def generate_conversational_response(user_message):
+    global chat_history
+    text = str(user_message or "").strip()
+    if not text:
+        return "Tell me anything and I'll keep the conversation going."
+
+    normalized = text.lower()
+    if normalized in {"reset chat", "clear chat", "forget conversation", "new conversation"}:
+        _clear_chat_history()
+        return "Conversation memory cleared. Starting fresh."
+
+    brain_context = HUMAN_BRAIN.build_prompt_context(text, domain="chat")
+
+    system_prompt = (
+        "You are Eli Bot, a helpful, joyful, and friendly Conversational AI. "
+        "Keep your responses relatively brief, friendly, and natural. "
+        "Do not output markdown code blocks unless requested. Avoid technical jargon unless asked. "
+        "Treat this as an ongoing conversation: keep continuity with prior context and resolve references like pronouns naturally. "
+        f"{brain_context}"
+    )
+
+    with chat_history_lock:
+        chat_history = chat_history[-CONVERSATION_MAX_STORED_MESSAGES:]
+        history_context = chat_history[-CONVERSATION_CONTEXT_MESSAGES:]
+
+    messages = [{"role": "system", "content": system_prompt}, *history_context, {"role": "user", "content": text}]
+
+    try:
+        response = api_call(messages, max_tokens=200, temperature=0.7)
+    except Exception as e:
+        print(f"Error in api_call for conversation: {e}")
+        response = "I'm sorry, I'm having trouble thinking right now."
+
+    with chat_history_lock:
+        chat_history.append({"role": "user", "content": text})
+        chat_history.append({"role": "assistant", "content": response})
+        chat_history = chat_history[-CONVERSATION_MAX_STORED_MESSAGES:]
+        _save_chat_history(chat_history)
+
+    return response
 
 # Initialize the speech recognition and text to speech engines
 assistant_voice_recognition_enabled = True  # Disable if you don't want to use voice recognition
@@ -109,7 +399,7 @@ def create_input_bubble(action=False):
     # Create bubble as a top-level window
     bubble = Ctk.CTkToplevel(root)
     bubble.attributes('-alpha', 0.85)
-    bubble.overrideredirect(False)
+    bubble.overrideredirect(True)
     bubble.attributes('-topmost', True)
     bubble.geometry(f'{bubble_width}x{bubble_height}+{bubble_x}+{bubble_y}')
 
@@ -124,7 +414,7 @@ def create_input_bubble(action=False):
     # Create the entry widget
     entry = Ctk.CTkEntry(bubble, corner_radius=6, placeholder_text_color="#0b2d39",
                          fg_color="#e1f2f1", text_color="#040f13",
-                         placeholder_text="Type here the action to perform...", width=450,
+                         placeholder_text="Type action or chat here...", width=450,
                          border_width=1, border_color="darkgray")
     entry.bind("<Escape>", _close_bubble)
     entry.pack(padx=0, pady=0)
@@ -147,35 +437,391 @@ def create_input_bubble(action=False):
     bubble.bind("<FocusIn>", lambda e: entry.focus_force())
     return bubble  # Returning bubble reference in case it needs to be accessed
 
+
+def _looks_like_action_request(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+
+    normalized = raw.lower()
+    action_prefixes = (
+        "open ", "launch ", "click ", "click on ", "double click ", "right click ",
+        "press ", "type ", "write ", "scroll", "run ", "execute ", "start ",
+        "close ", "switch ", "move ", "drag ", "drop ", "save ", "export ",
+        "search ", "find ", "book ", "plan ", "word ", "winword ", "edge task ",
+        "browser task ", "bash:", "bash ", "shell:", "shell ",
+    )
+
+    if normalized.startswith(action_prefixes):
+        return True
+
+    if re.match(r"^(https?://|www\.)\S+$", raw, flags=re.IGNORECASE):
+        return True
+
+    if re.match(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+(?:/\S*)?$", raw, flags=re.IGNORECASE):
+        return True
+
+    return False
+
+
+def _prefer_conversation(text: str, action_mode: bool = False) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+
+    normalized = raw.lower()
+    greeting_pattern = re.compile(
+        r"^(hi|hello|hey|yo|good\s+(morning|afternoon|evening)|how are you|what's up|whats up)\b",
+        flags=re.IGNORECASE,
+    )
+    if greeting_pattern.search(normalized):
+        return True
+
+    # In action mode, only keep action routing when the user actually typed an actionable command.
+    if action_mode and _looks_like_action_request(raw):
+        return False
+
+    if _looks_like_action_request(raw):
+        return False
+
+    # Natural dialogue cues: questions and short free-form statements with no action verbs.
+    if raw.endswith("?") or len(raw.split()) <= 8:
+        return True
+
+    return False
+
+
+def _extract_forced_computer_use_goal(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    normalized = raw.lower()
+    trigger_phrases = (
+        "brute force computer use",
+        "force computer use",
+        "computer use brute force",
+        "computer use",
+        "force agent",
+    )
+    if not any(phrase in normalized for phrase in trigger_phrases):
+        return ""
+
+    # Keep the user objective by stripping common force-control tokens.
+    goal = re.sub(
+        r"\b(brute\s*force|force|computer\s*use|agent|for|to|the)\b",
+        " ",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    goal = re.sub(r"\s+", " ", goal).strip(" .:-")
+    return goal or raw
+
+
+def _is_forced_computer_use_command(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw.startswith("/"):
+        return False
+
+    body = raw[1:].strip()
+    if not body:
+        return False
+
+    cmd = body.split(" ", 1)[0].lower().strip()
+    return cmd in {"computer", "computeruse", "cu", "force"}
+
+
+def _show_computer_use_forced_badge(bubble, entry):
+    try:
+        bubble.configure(fg_color="#12311f")
+    except Exception:
+        pass
+
+    try:
+        entry.configure(border_color="#2fd46f", border_width=2)
+    except Exception:
+        pass
+
+    try:
+        badge = Ctk.CTkLabel(
+            bubble,
+            text="Computer Use forced",
+            fg_color="#2fd46f",
+            text_color="#062112",
+            corner_radius=8,
+            padx=8,
+            pady=1,
+            font=("Segoe UI", 10, "bold"),
+        )
+        badge.place(relx=1.0, x=-8, y=2, anchor="ne")
+    except Exception:
+        pass
+
+
+def _handle_slash_command(text: str, action_mode: bool = False) -> bool:
+    raw = str(text or "").strip()
+    if not raw.startswith("/"):
+        return False
+
+    body = raw[1:].strip()
+    if not body:
+        message_queue.put("Empty slash command. Use /help.")
+        return True
+
+    parts = body.split(" ", 1)
+    cmd = parts[0].lower().strip()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd in {"help", "?"}:
+        message_queue.put(
+            "Slash commands: /help, /chat <text>, /action <step>, /assistant <goal>, /word <instruction>, /tempest <objective>, /tempest-strict <on|off|status>, /brain-status [domain|levels|trend [domain]|mistakes [N]|profile <mode>|preset <cautious|balanced|aggressive>|set <ENV_KEY> <value>|decay [domain]], /clear"
+        )
+        return True
+
+    if cmd in {"brain-status", "brain", "brainstatus"}:
+        if arg.lower().strip().startswith("mistakes"):
+            parts_mistakes = arg.split(" ", 1)
+            if len(parts_mistakes) > 1 and parts_mistakes[1].strip():
+                try:
+                    n = int(parts_mistakes[1].strip())
+                except Exception:
+                    message_queue.put("Usage: /brain-status mistakes [N]")
+                    return True
+            else:
+                n = 10
+            message_queue.put(_summarize_brain_mistakes(n))
+            return True
+
+        if arg.lower().strip().startswith("levels"):
+            message_queue.put(HUMAN_BRAIN.consciousness_catalog_summary())
+            return True
+
+        if not arg or arg.lower().strip() in {"status", "show", "all"}:
+            message_queue.put(_format_brain_status_summary())
+            return True
+
+        lowered = arg.lower().strip()
+        if lowered.startswith("profile "):
+            profile = arg.split(" ", 1)[1].strip().lower()
+            if profile not in {"cautious", "balanced", "aggressive"}:
+                message_queue.put("Usage: /brain-status profile <cautious|balanced|aggressive>")
+                return True
+            os.environ["ELI_HUMAN_BRAIN_PROFILE"] = profile
+            _reload_human_brain()
+            message_queue.put(f"Brain profile updated to {profile}.")
+            message_queue.put(_format_brain_status_summary())
+            return True
+
+        if lowered.startswith("preset "):
+            preset = arg.split(" ", 1)[1].strip().lower()
+            if not _apply_brain_preset_env(preset):
+                message_queue.put("Usage: /brain-status preset <cautious|balanced|aggressive>")
+                return True
+            message_queue.put(f"Brain preset applied: {preset}")
+            message_queue.put(_format_brain_status_summary())
+            return True
+
+        if lowered.startswith("set "):
+            set_parts = arg.split(" ", 2)
+            if len(set_parts) < 3:
+                message_queue.put("Usage: /brain-status set <ENV_KEY> <value>")
+                return True
+            key = set_parts[1].strip()
+            value = set_parts[2].strip()
+            if not key.startswith("ELI_HUMAN_BRAIN_") and not key.startswith("ELI_BRAIN_"):
+                message_queue.put("Only ELI_HUMAN_BRAIN_* or ELI_BRAIN_* keys are allowed.")
+                return True
+            os.environ[key] = value
+            _reload_human_brain()
+            message_queue.put(f"Brain setting updated: {key}={value}")
+            message_queue.put(_format_brain_status_summary())
+            return True
+
+        if lowered.startswith("decay"):
+            parts_decay = arg.split(" ", 1)
+            domain = parts_decay[1].strip().lower() if len(parts_decay) > 1 else "chat"
+            snap = HUMAN_BRAIN.decay_now(domain)
+            message_queue.put(
+                f"Decay applied for {snap.get('domain')}: val={snap.get('valence', 0.0):.2f}, "
+                f"aro={snap.get('arousal', 0.0):.2f}, focus={snap.get('focus', 0.0):.2f}"
+            )
+            return True
+
+        if lowered.startswith("trend"):
+            parts_trend = arg.split(" ", 1)
+            domain = parts_trend[1].strip().lower() if len(parts_trend) > 1 else "chat"
+            trend = HUMAN_BRAIN.trend_snapshot(domain)
+            delta = trend.get("delta", {}) if isinstance(trend.get("delta"), dict) else {}
+            message_queue.put(
+                f"Brain trend {trend.get('domain')}: samples={int(trend.get('samples', 0))}, "
+                f"d_focus={float(delta.get('focus', 0.0)):.3f}, "
+                f"d_arousal={float(delta.get('arousal', 0.0)):.3f}, "
+                f"d_valence={float(delta.get('valence', 0.0)):.3f}"
+            )
+            return True
+
+        # Treat free-form arg as a domain selector.
+        domain_snapshot = HUMAN_BRAIN.state_snapshot(arg.lower().strip())
+        level = domain_snapshot.get("consciousness_level", {}) if isinstance(domain_snapshot.get("consciousness_level"), dict) else {}
+        message_queue.put(
+            f"Brain domain {domain_snapshot.get('domain')}: profile={domain_snapshot.get('profile')}, "
+            f"val={domain_snapshot.get('valence', 0.0):.2f}, aro={domain_snapshot.get('arousal', 0.0):.2f}, "
+            f"focus={domain_snapshot.get('focus', 0.0):.2f}, updates={int(domain_snapshot.get('updates', 0))}, "
+            f"L{int(level.get('level', -1))}:{str(level.get('name', 'Unknown'))}"
+        )
+        return True
+
+    if cmd in {"tempest-strict", "strict", "failfast"}:
+        setting = arg.lower().strip()
+        if not setting or setting in {"status", "state"}:
+            status = "ON" if _is_tempest_strict_mode_enabled() else "OFF"
+            message_queue.put(f"Tempest strict mode: {status}")
+            return True
+        if setting in {"on", "enable", "enabled", "true", "1"}:
+            _set_tempest_strict_mode(True)
+            message_queue.put("Tempest strict mode enabled. Only T3MP3ST actions will run; local fallback is disabled.")
+            return True
+        if setting in {"off", "disable", "disabled", "false", "0"}:
+            _set_tempest_strict_mode(False)
+            message_queue.put("Tempest strict mode disabled. Local fallback is enabled.")
+            return True
+        message_queue.put("Usage: /tempest-strict <on|off|status>")
+        return True
+
+    if cmd in {"clear", "reset", "forget"}:
+        _clear_chat_history()
+        message_queue.put("Conversation memory cleared.")
+        return True
+
+    if cmd == "chat":
+        if not arg:
+            message_queue.put("Usage: /chat <message>")
+            return True
+        response = generate_conversational_response(arg)
+        message_queue.put(response)
+        return True
+
+    if cmd in {"action", "act"}:
+        if not arg:
+            message_queue.put("Usage: /action <step>")
+            return True
+        run_fast_action(arg)
+        return True
+
+    if cmd in {"assistant", "plan"}:
+        if not arg:
+            message_queue.put("Usage: /assistant <goal>")
+            return True
+        run_assistant(arg)
+        return True
+
+    if cmd == "word":
+        if not arg:
+            message_queue.put("Usage: /word <instruction>")
+            return True
+        instruction = arg if arg.lower().startswith(("word ", "winword ")) else f"word {arg}"
+        run_fast_action(instruction)
+        return True
+
+    if cmd in {"tempest", "t3mp3st"}:
+        if not arg:
+            message_queue.put("Usage: /tempest <objective>")
+            return True
+        run_tempest_action(arg)
+        return True
+
+    if cmd in {"computer", "computeruse", "cu", "force"}:
+        if not arg:
+            message_queue.put("Usage: /computer <objective>")
+            return True
+        run_fast_action(arg)
+        return True
+
+    if cmd in {"mode", "state"}:
+        mode_label = "action" if action_mode else "chat"
+        message_queue.put(f"Input mode: {mode_label}")
+        return True
+
+    message_queue.put(f"Unknown slash command: /{cmd}. Use /help.")
+    return True
+
 def process_input_and_close(bubble, entry, action=False):
     user_input = entry.get()
     print(f"Processing input: {user_input}")
+    text = user_input.strip()
+    forced_goal = _extract_forced_computer_use_goal(text)
+    force_command = _is_forced_computer_use_command(text)
+    force_badge_enabled = bool(forced_goal or force_command)
+
+    bubble_closed = False
 
     def _destroy_bubble():
+        nonlocal bubble_closed
+        if bubble_closed:
+            return
         try:
             bubble.grab_release()
         except Ctk.ctk_tk.TclError:
             pass
-        bubble.destroy()
+        try:
+            bubble.destroy()
+        except Ctk.ctk_tk.TclError:
+            pass
+        bubble_closed = True
 
-    if user_input.strip():
-        _destroy_bubble()
-        # Use the user input as needed: display, speech, or further processing.
-        show_message(None, user_input)
-        # speaker(user_input.strip())
-        if action:
-            print("Performing action: ", user_input)
-            action_thread = threading.Thread(target=run_fast_action, args=(user_input.strip(),), daemon=True)
-            action_thread.start()
+    if text:
+        if force_badge_enabled:
+            _show_computer_use_forced_badge(bubble, entry)
+            try:
+                bubble.after(900, _destroy_bubble)
+            except Ctk.ctk_tk.TclError:
+                _destroy_bubble()
         else:
-            print(f"Running assistant... Generating test case: {user_input.strip()}")
-            speaker(f"Running assistant... Generating test case: {user_input.strip()}")
-            # assistant(assistant_goal=user_input.strip(), called_from="assistant")
-            assistant_thread = threading.Thread(target=run_assistant, args=(user_input.strip(),))
-            assistant_thread.start()
-            # assistant(user_input.strip())
-        # auto_prompt(user_input.strip())
-    _destroy_bubble()  # Ensure the bubble is destroyed after submission
+            _destroy_bubble()
+
+        # Use the user input as needed: display, speech, or further processing.
+        show_message(None, text)
+        
+        def handle_input_thread(text, forced_override=""):
+            if _handle_slash_command(text, action_mode=action):
+                return
+
+            if forced_override:
+                run_fast_action(forced_override)
+                return
+
+            # Hard-route travel booking intents to action automation so prompts like
+            # "Book me a flight ..." don't get diverted into chat/classifier paths.
+            if _looks_like_expedia_trip_request(text.lower()):
+                run_fast_action(text)
+                return
+
+            if _prefer_conversation(text, action_mode=action):
+                response = generate_conversational_response(text)
+                message_queue.put(response)
+                return
+
+            role_function = auto_role(text)
+            print(f"Input Role Selection: {role_function}")
+            if "joyful_conversation" in role_function:
+                response = generate_conversational_response(text)
+                message_queue.put(response)
+            elif "windows_assistant" in role_function:
+                if action:
+                    print("Performing action: ", text)
+                    run_fast_action(text)
+                else:
+                    print(f"Running assistant... Generating test case: {text}")
+                    speaker(f"Running assistant... Generating test case: {text}")
+                    run_assistant(text)
+            else:
+                # Fallback to conversational response
+                response = generate_conversational_response(text)
+                message_queue.put(response)
+
+        threading.Thread(target=handle_input_thread, args=(text, forced_goal), daemon=True).start()
+    else:
+        _destroy_bubble()  # Close immediately when there is no input.
 
 def listen_and_respond():
     action = listen_to_speech()
@@ -200,15 +846,67 @@ def run_fast_action(action_text):
         message_queue.put("Action failed. Check console logs.")
 
 
+def run_tempest_action(action_text):
+    objective = str(action_text or "").strip()
+    if not objective:
+        message_queue.put("Tempest objective was empty.")
+        return False
+
+    try:
+        result_message = dispatch_tempest_prompt(objective)
+    except Exception as e:
+        print(f"Tempest dispatch failed: {e}")
+        message_queue.put(f"Tempest failed: {e}")
+        return False
+
+    message_queue.put(result_message)
+    return True
+
+
+def _attempt_tempest_first(raw_action: str) -> bool:
+    objective = str(raw_action or "").strip()
+    if not objective:
+        return False
+
+    # Hard-route each action through T3MP3ST first, then fall back to local execution only on failure.
+    return bool(run_tempest_action(objective))
+
+
 def _run_bruteforce_action(action_text):
     raw = str(action_text or "").strip()
     if not raw:
         return
 
+    normalized = raw.lower()
+    explicit_tempest = normalized.startswith("tempest ") or normalized.startswith("t3mp3st ")
+    tempest_objective = raw.split(" ", 1)[1].strip() if explicit_tempest and " " in raw else raw
+
+    if _attempt_tempest_first(tempest_objective):
+        return
+
+    if _is_tempest_strict_mode_enabled():
+        message_queue.put("Tempest strict mode blocked local fallback because T3MP3ST did not complete the action.")
+        return
+
+    if explicit_tempest:
+        return
+
+    if _try_autoresearch_word_actions(raw):
+        return
+
+    if _try_word_actions(raw):
+        return
+
     if _try_edge_actions(raw):
         return
 
-    normalized = raw.lower()
+    bash_command = _extract_bash_command(raw)
+    if bash_command:
+        _execute_bash_command(bash_command)
+        return
+
+    if _try_launch_exe_from_prompt(raw):
+        return
 
     if _looks_like_expedia_trip_request(normalized):
         if _plan_trip_on_expedia(raw):
@@ -223,6 +921,12 @@ def _run_bruteforce_action(action_text):
     extracted_url = _extract_any_url_from_text(raw)
     if extracted_url:
         _execute_any_url_end_to_end(extracted_url, raw)
+        return
+
+    workflow_steps = get_word_workflow_steps(raw)
+    if workflow_steps:
+        for step in workflow_steps:
+            _try_word_actions(step)
         return
 
     # Direct command families first: deterministic and fast.
@@ -269,6 +973,266 @@ def _run_bruteforce_action(action_text):
     # Last fallback: let full planner generate a recoverable multi-step sequence.
     print("Brute-force fallback: escalating to assistant planner")
     assistant(assistant_goal=raw, called_from="assistant")
+
+
+def _try_launch_exe_from_prompt(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+
+    lowered = text.lower()
+    prefixes = ("open ", "launch ", "run ", "execute ", "start ")
+    prefixed = False
+    payload = text
+
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            prefixed = True
+            payload = text[len(prefix):].strip()
+            break
+
+    if not prefixed and ".exe" not in lowered:
+        return False
+
+    if not payload:
+        message_queue.put("No executable path provided.")
+        return True
+
+    raw_exe = ""
+    args = []
+
+    quoted_match = re.search(r"[\"']([^\"']+?\.exe)[\"']", payload, flags=re.IGNORECASE)
+    if quoted_match:
+        raw_exe = quoted_match.group(1).strip()
+        remainder = (payload[:quoted_match.start()] + payload[quoted_match.end():]).strip()
+        if remainder:
+            try:
+                args = [part.strip() for part in shlex.split(remainder, posix=False)]
+            except ValueError:
+                args = [remainder]
+    else:
+        try:
+            tokens = shlex.split(payload, posix=False)
+        except ValueError:
+            tokens = [payload]
+
+        if not tokens:
+            message_queue.put("No executable path provided.")
+            return True
+
+        exe_index = -1
+        for idx, token in enumerate(tokens):
+            clean = token.strip().strip('"').strip("'")
+            if clean.lower().endswith(".exe"):
+                exe_index = idx
+                break
+
+        if exe_index >= 0:
+            raw_exe = tokens[exe_index].strip().strip('"').strip("'")
+            args = [part.strip() for part in tokens[exe_index + 1 :]]
+        elif prefixed:
+            raw_exe = tokens[0].strip().strip('"').strip("'")
+            args = [part.strip() for part in tokens[1:]]
+        else:
+            return False
+
+    if not raw_exe:
+        message_queue.put("No executable path provided.")
+        return True
+
+    resolved_exe = _resolve_exe_from_prompt(raw_exe)
+    if not resolved_exe:
+        message_queue.put(f"Executable not found: {raw_exe}")
+        return True
+
+    launch_cwd = os.path.dirname(resolved_exe) or None
+    launch_errors = []
+
+    try:
+        subprocess.Popen([resolved_exe, *args], cwd=launch_cwd)
+        message_queue.put(f"Launched EXE: {resolved_exe}")
+        return True
+    except Exception as e:
+        launch_errors.append(f"popen={e}")
+
+    try:
+        if not args:
+            os.startfile(resolved_exe)
+            message_queue.put(f"Launched EXE: {resolved_exe}")
+            return True
+    except Exception as e:
+        launch_errors.append(f"startfile={e}")
+
+    try:
+        subprocess.Popen(["cmd", "/c", "start", "", resolved_exe, *args], cwd=launch_cwd, shell=False)
+        message_queue.put(f"Launched EXE: {resolved_exe}")
+        return True
+    except Exception as e:
+        launch_errors.append(f"cmd_start={e}")
+
+    detail = launch_errors[0] if launch_errors else "unknown error"
+    message_queue.put(f"EXE launch failed: {detail}")
+    return True
+
+
+def _resolve_exe_from_prompt(raw_exe: str) -> str:
+    exe_candidate = os.path.expandvars(os.path.expanduser(str(raw_exe or "").strip()))
+    if not exe_candidate:
+        return ""
+
+    candidates = [exe_candidate]
+    if not exe_candidate.lower().endswith(".exe"):
+        candidates.append(f"{exe_candidate}.exe")
+
+    for candidate in candidates:
+        if os.path.isabs(candidate) and os.path.isfile(candidate):
+            return candidate
+
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+
+        path_hit = shutil.which(candidate) or shutil.which(os.path.basename(candidate))
+        if path_hit:
+            return path_hit
+
+    return ""
+
+
+def _extract_bash_command(raw_action: str) -> str:
+    text = str(raw_action or "").strip()
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    prefixes = ("bash:", "bash ", "run bash ", "shell:", "shell ")
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            return text[len(prefix):].strip()
+    return ""
+
+
+def _resolve_git_bash_executable() -> str:
+    env_path = str(os.environ.get("ELI_GIT_BASH", "")).strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    preferred_paths = (
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "C:\\Program Files\\Git\\git-bash.exe",
+        "C:\\ProgramData\\chocolatey\\lib\\git.portable\\tools\\bin\\bash.exe",
+        "C:\\ProgramData\\chocolatey\\lib\\git.portable\\tools\\git-bash.exe",
+    )
+    for path in preferred_paths:
+        if os.path.exists(path):
+            return path
+
+    for candidate in ("git-bash", "bash"):
+        resolved = shutil.which(candidate)
+        if resolved and os.path.exists(resolved):
+            return resolved
+    return ""
+
+
+def _execute_bash_command(command: str):
+    cmd = str(command or "").strip()
+    if not cmd:
+        message_queue.put("Bash command was empty.")
+        return
+
+    if _try_launch_exe_from_bash_command(cmd):
+        return
+
+    bash_exe = _resolve_git_bash_executable()
+    if not bash_exe:
+        message_queue.put("Git Bash not found. Install with: choco install git.portable -y")
+        return
+
+    timeout_seconds = int(str(os.environ.get("ELI_BASH_TIMEOUT", "90")).strip() or "90")
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    try:
+        result = subprocess.run(
+            [bash_exe, "-lc", cmd],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        message_queue.put(f"Bash command timed out after {timeout_seconds}s.")
+        return
+    except Exception as e:
+        message_queue.put(f"Bash execution failed: {e}")
+        return
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    exit_code = result.returncode
+
+    if stdout:
+        print(f"[bash stdout]\n{stdout}")
+    if stderr:
+        print(f"[bash stderr]\n{stderr}")
+
+    if exit_code == 0:
+        summary = stdout[:260] if stdout else "Command finished successfully."
+        message_queue.put(f"Bash OK: {summary}")
+    else:
+        failure = stderr[:260] if stderr else (stdout[:260] if stdout else "Unknown Bash error")
+        message_queue.put(f"Bash failed (exit {exit_code}): {failure}")
+
+
+def _try_launch_exe_from_bash_command(command: str) -> bool:
+    text = str(command or "").strip()
+    if not text:
+        return False
+
+    match = re.match(r"^(?:open-exe|launch-exe|open)\s+(.+)$", text, flags=re.IGNORECASE)
+    if not match:
+        return False
+
+    payload = match.group(1).strip()
+    if not payload:
+        message_queue.put("No executable path provided.")
+        return True
+
+    try:
+        tokens = shlex.split(payload, posix=False)
+    except ValueError:
+        tokens = [payload]
+
+    if not tokens:
+        message_queue.put("No executable path provided.")
+        return True
+
+    raw_exe = tokens[0].strip().strip('"').strip("'")
+    args = [t.strip() for t in tokens[1:]]
+
+    if not raw_exe.lower().endswith(".exe"):
+        message_queue.put("Only .exe launch is supported for open-exe/launch-exe/open.")
+        return True
+
+    exe_candidate = os.path.expandvars(os.path.expanduser(raw_exe))
+    resolved_exe = ""
+
+    if os.path.isabs(exe_candidate) and os.path.exists(exe_candidate):
+        resolved_exe = exe_candidate
+    else:
+        path_hit = shutil.which(exe_candidate) or shutil.which(os.path.basename(exe_candidate))
+        if path_hit:
+            resolved_exe = path_hit
+
+    if not resolved_exe:
+        message_queue.put(f"Executable not found: {raw_exe}")
+        return True
+
+    try:
+        launch_cwd = os.path.dirname(resolved_exe) or None
+        subprocess.Popen([resolved_exe, *args], cwd=launch_cwd)
+        message_queue.put(f"Launched EXE: {resolved_exe}")
+    except Exception as e:
+        message_queue.put(f"EXE launch failed: {e}")
+    return True
 
 
 def _extract_any_url_from_text(text: str) -> str:
@@ -410,6 +1374,169 @@ def _normalize_trip_date(raw_date: str) -> str:
     return ""
 
 
+def _resolve_chrome_executable() -> str:
+    env_path = str(os.environ.get("ELI_CHROME_PATH", "")).strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    preferred_paths = (
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    )
+    for path in preferred_paths:
+        if os.path.exists(path):
+            return path
+
+    for candidate in ("chrome", "chrome.exe", "google-chrome", "google-chrome-stable"):
+        resolved = shutil.which(candidate)
+        if resolved and os.path.exists(resolved):
+            return resolved
+    return ""
+
+
+def _open_expedia_in_chrome() -> bool:
+    chrome_exe = _resolve_chrome_executable()
+    if not chrome_exe:
+        return False
+
+    try:
+        subprocess.Popen([chrome_exe, "--new-window"])  # Open browser first, then type URL into omnibox.
+        time.sleep(1.2)
+        chrome_hwnd, _ = find_window_by_title("google chrome")
+        if chrome_hwnd:
+            bring_to_foreground(chrome_hwnd)
+        else:
+            activate_windowt_title("google chrome")
+        time.sleep(0.6)
+        perform_simulated_keypress("Ctrl + L")
+        pyautogui.write("expedia.com", interval=0.01)
+        perform_simulated_keypress("Enter")
+        time.sleep(1.1)
+
+        # Self-heal: if we still don't see Expedia, open it directly in a fresh Chrome window.
+        rows = open_windows_info()
+        expedia_visible = any("expedia" in str(item[1]).lower() for item in rows)
+        if not expedia_visible:
+            subprocess.Popen([chrome_exe, "--new-window", "https://www.expedia.com"])
+            time.sleep(1.0)
+
+        # Make sure the browser is visibly foregrounded before returning.
+        _ensure_browser_visible_for_expedia()
+        return True
+    except Exception as e:
+        print(f"Chrome Expedia launch failed: {e}")
+        return False
+
+
+def _ensure_browser_visible_for_expedia() -> bool:
+    """Force an Expedia/Chrome window to the foreground so actions run on a visible browser."""
+    candidates = (
+        "expedia",
+        "google chrome",
+        "chrome",
+    )
+
+    for attempt in range(6):
+        # Aggressive fallback cadence for focus recovery when another app stole focus.
+        if attempt in {2, 4}:
+            try:
+                perform_simulated_keypress("Win + D")
+            except Exception as e:
+                print(f"Browser visibility desktop reveal failed: {e}")
+            time.sleep(0.12)
+
+        if attempt >= 1:
+            try:
+                perform_simulated_keypress("Alt + Tab")
+            except Exception as e:
+                print(f"Browser visibility alt-tab failed: {e}")
+            time.sleep(0.08)
+
+        for title_hint in candidates:
+            try:
+                hwnd, resolved_title = find_window_by_title(title_hint)
+            except Exception as e:
+                print(f"Browser visibility lookup failed for '{title_hint}': {e}")
+                hwnd, resolved_title = None, None
+
+            if hwnd:
+                try:
+                    bring_to_foreground(hwnd)
+                except Exception as e:
+                    print(f"Browser visibility foreground failed: {e}")
+
+                # Reinforce activation by title when available.
+                try:
+                    activate_windowt_title(resolved_title or title_hint)
+                except Exception as e:
+                    print(f"Browser visibility activate-by-title failed: {e}")
+
+                # Keep browser fully visible and receive input focus deterministically.
+                try:
+                    perform_simulated_keypress("Win + Up")
+                except Exception as e:
+                    print(f"Browser visibility maximize failed: {e}")
+
+                try:
+                    perform_simulated_keypress("Ctrl + 1")
+                except Exception as e:
+                    print(f"Browser visibility first-tab focus failed: {e}")
+
+                try:
+                    size = pyautogui.size()
+                    pyautogui.click(size.width // 2, 120)
+                except Exception as e:
+                    print(f"Browser visibility viewport click failed: {e}")
+
+                time.sleep(0.15)
+                return True
+
+            try:
+                activate_windowt_title(title_hint)
+            except Exception:
+                pass
+
+        time.sleep(0.2)
+
+    return False
+
+
+def _dismiss_expedia_overlays_deterministic():
+    """Run a fixed, deterministic sequence to dismiss common Expedia modal overlays."""
+    # 1) First attempt: keyboard dismiss.
+    for _ in range(2):
+        try:
+            perform_simulated_keypress("Escape")
+        except Exception as e:
+            print(f"Overlay killer Escape failed: {e}")
+        time.sleep(0.2)
+
+    # 2) Second attempt: deterministic text/button close heuristics.
+    close_steps = [
+        "click the X close button on the popup",
+        "click close on the sign in popup",
+        "click not now",
+        "click no thanks",
+        "click dismiss",
+        "click continue without signing in",
+    ]
+    for step in close_steps:
+        try:
+            fast_act(single_step=step)
+        except Exception as e:
+            print(f"Overlay killer click heuristic failed for '{step}': {e}")
+        time.sleep(0.2)
+
+    # 3) Last deterministic fallback: click near top-right close icon region.
+    try:
+        size = pyautogui.size()
+        fallback_x = max(50, size.width - 60)
+        fallback_y = 170
+        pyautogui.click(fallback_x, fallback_y)
+    except Exception as e:
+        print(f"Overlay killer coordinate fallback failed: {e}")
+
+
 def _build_expedia_search_url(details) -> str:
     origin = str(details.get("origin", "")).strip()
     destination = str(details.get("destination", "")).strip()
@@ -437,22 +1564,45 @@ def _build_expedia_search_url(details) -> str:
 
 def _plan_trip_on_expedia(prompt: str) -> bool:
     details = _extract_trip_details(prompt)
-    expedia_url = _build_expedia_search_url(details)
+    speaker("Opening Google Chrome and Expedia to plan your trip.")
 
-    speaker("Planning your Expedia trip in Microsoft Edge.")
-    activate_windowt_title(expedia_url)
-    time.sleep(1.2)
+    opened_in_chrome = _open_expedia_in_chrome()
+    if not opened_in_chrome:
+        # Fallback keeps trip flow working if Chrome is unavailable.
+        activate_windowt_title("https://www.expedia.com")
+        time.sleep(1.2)
+
+    # Ensure Chrome/Expedia is visible before popup dismissal and planner handoff.
+    _ensure_browser_visible_for_expedia()
+
+    # Deterministic first-step overlay killer before planner handoff.
+    _dismiss_expedia_overlays_deterministic()
+
+    # Keep the browser in front in case dismissal shifted focus.
+    _ensure_browser_visible_for_expedia()
 
     # Always hand over to the planner so execution continues end-to-end even when Expedia
     # shows transient errors, sign-in modals, or partially prefilled searches.
     assistant(
         assistant_goal=(
-            "Use Microsoft Edge and Expedia.com to complete this trip request end-to-end: "
+            "Use Google Chrome and Expedia.com to brute-force complete this flight booking end-to-end: "
             f"{prompt}. "
+            f"Parsed trip details: origin={details.get('origin','') or 'unknown'}, "
+            f"destination={details.get('destination','') or 'unknown'}, "
+            f"depart={details.get('depart_date','') or 'unknown'}, "
+            f"return={details.get('return_date','') or 'unknown'}, "
+            f"adults={details.get('adults','1')}. "
+            "If Chrome is not available, continue in whatever browser is active. "
             "First dismiss any sign-in overlays or promotional popups. "
+            "Brute-force execution policy: do not stop at search results. Keep progressing through "
+            "flight selection, fare selection, traveler details, and checkout screens. "
             "If Expedia shows an error like 'Sorry, we're having a problem on our end', click Retry. "
             "If Retry fails, rebuild the search form manually from the user request and run search again. "
-            "Finish by showing available trip options on the results page."
+            "If blocked by stale state, open a fresh tab to expedia.com and retry the flow. "
+            "Success condition: reach the final booking review or payment confirmation step. "
+            "Never submit unauthorized purchases and never bypass protected auth or payment controls. "
+            "If mandatory booking/payment fields are missing, pause and ask only for missing user-provided fields, "
+            "then resume automation from that exact step and continue to final review/confirmation."
         ),
         called_from="assistant",
     )
@@ -498,6 +1648,60 @@ def _try_edge_actions(raw_action: str) -> bool:
     return True
 
 
+def _try_autoresearch_word_actions(raw_action: str) -> bool:
+    normalized = str(raw_action or "").strip().lower()
+    if not normalized:
+        return False
+
+    is_autoresearch_word_prompt = normalized.startswith("word research ") or normalized.startswith("winword research ")
+    if not is_autoresearch_word_prompt:
+        return False
+
+    if str(os.environ.get("ENABLE_AUTORESEARCH_WORD", "false")).strip().lower() not in {"1", "true", "yes", "on"}:
+        message_queue.put("Autoresearch Word integration is disabled. Set ENABLE_AUTORESEARCH_WORD=true")
+        return True
+
+    try:
+        from edge_actions.autoresearch_word import AutoresearchWordBridge
+
+        bridge = AutoresearchWordBridge()
+        result = bridge.run_from_prompt(raw_action)
+        status = str(result.get("status", "unknown"))
+        detail = str(result.get("blocked_reason") or result.get("message") or "")
+        if detail:
+            message_queue.put(f"Autoresearch Word status: {status} ({detail})")
+        else:
+            message_queue.put(f"Autoresearch Word status: {status}")
+    except Exception as e:
+        message_queue.put(f"Autoresearch Word failed: {e}")
+    return True
+
+
+def _try_word_actions(raw_action: str) -> bool:
+    normalized = str(raw_action or "").strip().lower()
+    if not normalized:
+        return False
+
+    is_word_prompt = normalized.startswith("word ") or normalized.startswith("winword ")
+    if not is_word_prompt:
+        return False
+
+    try:
+        from edge_actions.word import WordWorkflowEngine, word_actions_enabled
+
+        if not word_actions_enabled():
+            message_queue.put("Word actions are disabled. Set ELI_WORD_ACTIONS_ENABLED=true")
+            return True
+
+        engine = WordWorkflowEngine()
+        result = engine.run_prompt(raw_action)
+        status = result.get("status", "unknown")
+        message_queue.put(f"Word action status: {status}")
+    except Exception as e:
+        message_queue.put(f"Word action failed: {e}")
+    return True
+
+
 def start_drag(event):
     # Record the starting point for dragging
     global offset_x, offset_y, click_time
@@ -539,8 +1743,9 @@ def show_message(event=None, message="Hello! How can I help you?"):
     message_label = Ctk.CTkLabel(message_window, text=message)
     message_label.configure(corner_radius=6, fg_color="#e1f2f1", text_color="black", bg_color="gray")
     message_label.pack(padx=0, pady=0)
-    # Close the message bubble after 3 seconds
-    message_window.after(3000, message_window.destroy)
+    # Close the message bubble after a dynamic duration based on words count, minimum 3 seconds
+    timeout = max(3000, calculate_duration_of_speech(message))
+    message_window.after(timeout, message_window.destroy)
 
 def create_context_menu(event_x_root, event_y_root):
     global context_menu_ref, assistant_voice_enabled, assistant_anim_enabled, assistant_subtitles_enabled, assistant_voice_recognition_enabled  # Use the global references
@@ -692,6 +1897,7 @@ def stop_assistant():
 
 
 def restart_assistant():
+    _clear_chat_history()
     root.destroy()
     create_app()
     pass
@@ -757,7 +1963,7 @@ def listen_thread():
                         ok_computer = listen_to_speech()
                         if ok_computer:
                             show_message(None, ok_computer)
-                            assistant(ok_computer)
+                            auto_prompt(ok_computer)
                     elif "open" in message_low[0:4]:
                         if len(message) < 18:
                             print("Opening the program: ", message)
@@ -801,23 +2007,43 @@ def listen_thread():
                 pass
 
 
-# Now start the listening thread when initializing
-listening_thread = threading.Thread(target=listen_thread, daemon=True)
-listening_thread.start()
+def _voice_thread_enabled() -> bool:
+    return str(os.environ.get("ELI_DISABLE_VOICE_THREAD", "")).strip().lower() not in {"1", "true", "yes", "on"}
+
+
+# Start the listening thread during normal runtime, but allow tests/importers to opt out.
+listening_thread = None
+if _voice_thread_enabled():
+    listening_thread = threading.Thread(target=listen_thread, daemon=True)
+    listening_thread.start()
 
 
 def auto_prompt(message):
+    # Voice/input autoprompt should prioritize Expedia/travel automation before chat routing.
+    if _looks_like_expedia_trip_request(str(message or "").lower()):
+        run_fast_action(message)
+        return
+
+    if _prefer_conversation(message, action_mode=False):
+        response = generate_conversational_response(message)
+        message_queue.put(response)
+        return
+
     role_function = auto_role(message)
-    print(f"Assistant: {role_function.strip('windows_assistant').strip('joyful_conversation').strip(' - ')}")
+    print(f"Assistant Role Selection: {role_function}")
     if "windows_assistant" in role_function:
-        message_queue.put(f"{role_function.strip('windows_assistant').strip(' - ')}")
+        msg = role_function.replace('windows_assistant', '').strip(' - ')
+        message_queue.put(msg)
         # Start the assistant in a new thread:
         assistant_thread = threading.Thread(target=run_assistant, args=(message,))
         assistant_thread.start()
     elif "joyful_conversation" in role_function:
-        message_queue.put(f"{role_function.strip(f'joyful_conversation').strip(' - ')} How can I help you?")
+        response = generate_conversational_response(message)
+        message_queue.put(response)
     else:
-        print("NOT WORKING")
+        # Fallback to Conversational AI if classification is ambiguous
+        response = generate_conversational_response(message)
+        message_queue.put(response)
 
 
 def load_image(file_path, scale=0.125):
@@ -837,7 +2063,7 @@ def create_app():
     import ctypes
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
     root = Ctk.CTk()
-    root.title("AI Drone Assistant")
+    root.title("AI Agent")
     root.iconbitmap("media/headico.ico")
     root.overrideredirect(True)
     root.attributes('-topmost', True)
@@ -875,4 +2101,5 @@ def create_app():
     root.mainloop()
     pass
 
-create_app()
+if __name__ == "__main__":
+    create_app()

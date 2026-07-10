@@ -10,6 +10,43 @@ set "ROOT_MODEL_DIR=%ROOT%model\MiniCPM5-1B"
 set "ALLOW_ROOT_MODEL_HINT=1"
 set "ALLOW_ROOT_MODEL_AUTOLINK=1"
 
+set "MODE=%~1"
+
+if /I "%MODE%"=="/h" goto :usage
+if /I "%MODE%"=="-h" goto :usage
+if /I "%MODE%"=="/help" goto :usage
+if /I "%MODE%"=="help" goto :usage
+if /I "%MODE%"=="/?" goto :usage
+
+if not "%MODE%"=="" (
+    if /I "%MODE%"=="conversation" goto :mode_conversation
+    if /I "%MODE%"=="automation" goto :mode_automation
+    echo Unknown mode: "%MODE%"
+    goto :usage_error
+)
+goto :mode_done
+
+:mode_conversation
+if not defined ELI_ASSISTANT_PROFILE set "ELI_ASSISTANT_PROFILE=conversation"
+if not defined ELI_EDGE_ACTIONS_ENABLED set "ELI_EDGE_ACTIONS_ENABLED=false"
+if not defined ELI_WORD_ACTIONS_ENABLED set "ELI_WORD_ACTIONS_ENABLED=true"
+if not defined ENABLE_AUTORESEARCH_WORD set "ENABLE_AUTORESEARCH_WORD=false"
+if not defined ELI_CONVERSATION_DIR set "ELI_CONVERSATION_DIR=%ROOT%data\conversation"
+goto :mode_done
+
+:mode_automation
+if not defined ELI_ASSISTANT_PROFILE set "ELI_ASSISTANT_PROFILE=automation"
+if not defined ELI_EDGE_ACTIONS_ENABLED set "ELI_EDGE_ACTIONS_ENABLED=true"
+if not defined ELI_WORD_ACTIONS_ENABLED set "ELI_WORD_ACTIONS_ENABLED=true"
+if not defined ENABLE_AUTORESEARCH_WORD set "ENABLE_AUTORESEARCH_WORD=false"
+if not defined ELI_CONVERSATION_DIR set "ELI_CONVERSATION_DIR=%ROOT%data\conversation"
+goto :mode_done
+
+:mode_done
+
+rem Match assistant.py runtime defaults unless the user explicitly sets environment variables.
+set "PYTHONPATH=%CORE_DIR%;%ROOT%;%PYTHONPATH%"
+
 set "PYTHON=%ROOT%.venv312\Scripts\pythonw.exe"
 
 if "%ELI_BOT_CONSOLE%"=="1" set "PYTHON=%ROOT%.venv312\Scripts\python.exe"
@@ -57,3 +94,19 @@ start "" /D "%CORE_DIR%" "%PYTHON%" "%APP_ENTRY%"
 
 endlocal
 exit /b 0
+
+:usage
+echo Usage: assistant.bat [conversation^|automation]
+echo.
+echo Modes are optional and apply mode-specific defaults only when not already defined.
+echo Existing environment variables are respected.
+echo.
+echo Examples:
+echo   assistant.bat conversation
+echo   assistant.bat automation
+exit /b 0
+
+:usage_error
+echo.
+echo Usage: assistant.bat [conversation^|automation]
+exit /b 1

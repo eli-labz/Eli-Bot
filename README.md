@@ -33,7 +33,7 @@ Automation tools require scripting (e.g., AutoHotkey) or API integration (e.g., 
 **Eli Bot Breakthrough**:  
 ```python
 # True generalization for natural language directly driving UI actions
-assistant("Play Daft Punk on Spotify and email the lyrics to my friend")
+assistant("Book me a flight from Miami to Seattle departing July 15 for 2 adults")
 # The agent chooses a fitting item according to the related context to comply with user intent.
 ```
 
@@ -297,6 +297,37 @@ python ./assistant.py
 
 # Usage
 Run "Assistant.py", say "Ok computer" to enable the assistant by voice commands or click to it or enable the chat to do a fast action. Use Right click above the Assistant to see the available options for the assistant.
+
+## Brain status and mistake analytics
+
+Eli Bot includes a brain-state command surface for runtime introspection and adaptive execution behavior.
+
+Main command:
+
+```
+/brain-status
+```
+
+Consequence/mistake diagnostics:
+
+```
+/brain-status mistakes
+/brain-status mistakes 25
+```
+
+What the mistakes command reports:
+
+- Last N unintended consequence events found in edge action trace files.
+- Severity buckets from those same N events: high, medium, low, and other.
+- Top recurring failure patterns (grouped by consequence summary text).
+
+The summary is built from consequence_assessment events where unintended=true in trace JSON files under the edge action trace directory (default: edge_action_traces, configurable with ELI_EDGE_ACTIONS_TRACE_DIR).
+
+Example output shape:
+
+```
+Brain mistakes summary (last 10 unintended events). Severity buckets: high=2, medium=4, low=3, other=1. Recent: .... Top patterns: Cross-host navigation after click x3 | Verification failed after action x2.
+```
 
 For debugging mode execute "Driver.py". Inside it, you can debug and try easily the functions of "act" which is used alongside the assistant, "fast_act" and "assistant" by using the examples.
 To run a JSON test case, modify the JSON path from the "assistant" function.
